@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -27,7 +28,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -49,6 +49,7 @@ import com.melomaniac.app.ui.screens.FoldersScreen
 import com.melomaniac.app.ui.screens.GenreDetailScreen
 import com.melomaniac.app.ui.screens.GenresScreen
 import com.melomaniac.app.ui.screens.LibraryHomeScreen
+import com.melomaniac.app.ui.screens.LogsScreen
 import com.melomaniac.app.ui.screens.NowPlayingScreen
 import com.melomaniac.app.ui.screens.PlaylistDetailScreen
 import com.melomaniac.app.ui.screens.PlaylistsScreen
@@ -59,6 +60,7 @@ import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.ui.theme.Background
 import com.melomaniac.app.ui.theme.MeloTheme
 import com.melomaniac.app.ui.theme.TextMuted
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -97,11 +99,14 @@ class MainActivity : ComponentActivity() {
             .find(raw)?.value ?: return
         if (!Regex("spotify|youtube|youtu\\.be", RegexOption.IGNORE_CASE).containsMatchIn(link)) return
 
+        AppLog.i("Share", "Incoming link: $link")
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
             try {
                 val (_, msg) = container.downloadQueue.enqueueFromUserInput(link)
+                AppLog.i("Share", msg)
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
+                AppLog.e("Share", "Failed to enqueue link", e)
                 Toast.makeText(this@MainActivity, e.message ?: "Error", Toast.LENGTH_LONG).show()
             }
         }
@@ -130,7 +135,7 @@ fun MeloApp(
 
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
-    val showTabs = route in setOf("library", "search", "downloads", "settings")
+    val showTabs = route in setOf("library", "search", "downloads", "logs", "settings")
 
     fun play(tracks: List<TrackRow>, index: Int) {
         player.playTracks(tracks, index)
@@ -155,6 +160,7 @@ fun MeloApp(
                             Triple("library", "Biblioteca", Icons.Default.Home),
                             Triple("search", "Buscar", Icons.Default.Search),
                             Triple("downloads", "Descargas", Icons.Default.Download),
+                            Triple("logs", "Logs", Icons.Default.Terminal),
                             Triple("settings", "Ajustes", Icons.Default.Settings),
                         )
                         items.forEach { (r, label, icon) ->
@@ -204,6 +210,7 @@ fun MeloApp(
                 }
                 composable("search") { SearchScreen(container, ::play) }
                 composable("downloads") { DownloadsScreen(container) }
+                composable("logs") { LogsScreen() }
                 composable("settings") { SettingsScreen(container) }
                 composable("nowPlaying") { NowPlayingScreen(player) }
                 composable("artists") { ArtistsScreen(container) { nav.navigate("artist/$it") } }

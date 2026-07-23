@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.melomaniac.app.BuildConfig
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -37,6 +38,7 @@ class AppUpdater(private val context: Context) {
         .build()
 
     suspend fun checkForUpdate(): UpdateCheckResult = withContext(Dispatchers.IO) {
+        AppLog.i("Update", "Checking GitHub releases…")
         try {
             val request = Request.Builder()
                 .url(LATEST_RELEASE_URL)
@@ -45,12 +47,13 @@ class AppUpdater(private val context: Context) {
                 .build()
             client.newCall(request).execute().use { response ->
                 if (response.code == 404) {
+                    AppLog.i("Update", "No releases yet")
                     return@withContext UpdateCheckResult.UpToDate
                 }
                 if (!response.isSuccessful) {
-                    return@withContext UpdateCheckResult.Failed(
-                        "GitHub respondió ${response.code}",
-                    )
+                    val msg = "GitHub respondió ${response.code}"
+                    AppLog.e("Update", msg)
+                    return@withContext UpdateCheckResult.Failed(msg)
                 }
                 val body = response.body?.string().orEmpty()
                 if (body.isBlank()) {
@@ -64,6 +67,7 @@ class AppUpdater(private val context: Context) {
                 val remoteVersion = normalizeVersion(tagName)
                 val localVersion = normalizeVersion(BuildConfig.VERSION_NAME)
                 if (compareSemVer(remoteVersion, localVersion) <= 0) {
+                    AppLog.i("Update", "Up to date ($localVersion)")
                     return@withContext UpdateCheckResult.UpToDate
                 }
                 val assets = json.optJSONArray("assets")
@@ -80,6 +84,7 @@ class AppUpdater(private val context: Context) {
                 if (apkUrl.isNullOrBlank()) {
                     return@withContext UpdateCheckResult.Failed("No hay APK en el release")
                 }
+                AppLog.i("Update", "Available $remoteVersion")
                 UpdateCheckResult.Available(
                     ReleaseUpdate(
                         tagName = tagName,
@@ -90,6 +95,7 @@ class AppUpdater(private val context: Context) {
                 )
             }
         } catch (e: Exception) {
+            AppLog.e("Update", "Check failed", e)
             UpdateCheckResult.Failed(e.message ?: "Error al buscar actualizaciones")
         }
     }
@@ -98,7 +104,11 @@ class AppUpdater(private val context: Context) {
         update: ReleaseUpdate,
         onProgress: (String) -> Unit = {},
     ): File = withContext(Dispatchers.IO) {
-        onProgress("Descargando ${update.versionName}…")
+        fun progress(msg: String) {
+            AppLog.i("Update", msg)
+            onProgress(msg)
+        }
+        progress("Descargando ${update.versionName}…")
         val dir = File(context.cacheDir, "updates").also {
             if (it.exists()) it.deleteRecursively()
             it.mkdirs()
@@ -132,7 +142,7 @@ class AppUpdater(private val context: Context) {
             }
         }
         if (out.length() < 10_000L) error("APK descargado inválido")
-        onProgress("Listo para instalar")
+        progress("Listo para instalar")
         out
     }
 

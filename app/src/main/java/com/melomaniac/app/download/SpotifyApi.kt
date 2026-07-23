@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
+import com.melomaniac.app.util.AppLog
 
 data class SpotifyTrackMeta(
     val id: String,
@@ -54,11 +55,18 @@ class SpotifyApi {
 
     fun resolve(input: String, clientId: String, clientSecret: String): SpotifyResolve {
         val parsed = parseUrl(input) ?: error("URL de Spotify inválida")
+        AppLog.i("Spotify", "resolve ${parsed.first}/${parsed.second}")
         val access = accessToken(clientId, clientSecret)
         return when (parsed.first) {
-            "track" -> SpotifyResolve.Track(fetchTrack(parsed.second, access))
-            "album" -> SpotifyResolve.Collection(fetchAlbum(parsed.second, access))
-            else -> SpotifyResolve.Collection(fetchPlaylist(parsed.second, access))
+            "track" -> SpotifyResolve.Track(fetchTrack(parsed.second, access)).also {
+                AppLog.i("Spotify", "track: ${it.track.name}")
+            }
+            "album" -> SpotifyResolve.Collection(fetchAlbum(parsed.second, access)).also {
+                AppLog.i("Spotify", "album: ${it.collection.name} (${it.collection.tracks.size})")
+            }
+            else -> SpotifyResolve.Collection(fetchPlaylist(parsed.second, access)).also {
+                AppLog.i("Spotify", "playlist: ${it.collection.name} (${it.collection.tracks.size})")
+            }
         }
     }
 

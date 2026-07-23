@@ -4,10 +4,10 @@ import com.melomaniac.app.data.DownloadDao
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.LibraryRepository
 import com.melomaniac.app.data.SettingsRepository
+import com.melomaniac.app.util.AppLog
 import com.melomaniac.app.util.newId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -43,11 +43,13 @@ class DownloadQueue(
     fun stop() {
         running = false
         _status.value = "Pausado"
+        AppLog.i("Queue", "Pausado")
     }
 
     suspend fun enqueueFromUserInput(input: String): Pair<Int, String> {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return 0 to "Entrada vacía"
+        AppLog.i("Queue", "enqueue input: ${trimmed.take(120)}")
         val settings = settingsRepo.get()
 
         when {
@@ -216,6 +218,7 @@ class DownloadQueue(
         } catch (_: Exception) {
             JSONObject()
         }
+        AppLog.i("Queue", "start job=${job.id} ${job.urlOrQuery.take(80)}")
         downloadDao.update(job.id, "running", 1f, null, System.currentTimeMillis())
         try {
             var url = job.urlOrQuery
@@ -223,6 +226,7 @@ class DownloadQueue(
                 val title = meta.optString("title").ifBlank { url }
                 val artist = meta.optString("artist")
                 val query = "$title $artist".trim()
+                AppLog.i("Queue", "job=${job.id} matching YouTube: $query")
                 val hits = ytDlp.search(query, 6)
                 val best = hits.firstOrNull() ?: error("Sin coincidencia en YouTube")
                 url = best.url
@@ -255,7 +259,9 @@ class DownloadQueue(
                 genre = null,
             )
             downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+            AppLog.i("Queue", "done job=${job.id} → ${result.file.name}")
         } catch (e: Exception) {
+            AppLog.e("Queue", "failed job=${job.id}", e)
             downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
         }
     }

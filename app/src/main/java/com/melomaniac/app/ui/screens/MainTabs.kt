@@ -43,6 +43,7 @@ import com.melomaniac.app.ui.TrackList
 import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.ui.theme.Surface
 import com.melomaniac.app.ui.theme.TextSecondary
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -108,6 +109,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                         message = if (local.isEmpty()) "Sin resultados locales. Podés encolar la búsqueda para YouTube." else null
                     }
                 } catch (e: Exception) {
+                    AppLog.e("Search", "Buscar / Encolar failed", e)
                     message = e.message
                 } finally {
                     busy = false
@@ -121,6 +123,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                         val (_, msg) = container.downloadQueue.enqueueFromUserInput(query)
                         message = msg
                     } catch (e: Exception) {
+                        AppLog.e("Search", "Encolar YouTube failed", e)
                         message = e.message
                     }
                 }

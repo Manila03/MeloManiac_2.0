@@ -1,6 +1,6 @@
 package com.melomaniac.app.download
 
-import android.util.Log
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -38,6 +38,7 @@ class YtDlpRunner(
     }
 
     suspend fun search(query: String, limit: Int = 8): List<YtHit> = withContext(Dispatchers.IO) {
+        AppLog.i("yt-dlp", "search: $query (limit=$limit)")
         binaryManager.ensureBinaries()
         val args = listOf(
             "ytsearch$limit:$query",
@@ -47,10 +48,13 @@ class YtDlpRunner(
             "--no-warnings",
         )
         val out = run(args, "search").stdout
-        parseHits(out)
+        val hits = parseHits(out)
+        AppLog.i("yt-dlp", "search → ${hits.size} hits")
+        hits
     }
 
     suspend fun listPlaylist(url: String): List<YtHit> = withContext(Dispatchers.IO) {
+        AppLog.i("yt-dlp", "list playlist: $url")
         binaryManager.ensureBinaries()
         val args = listOf(
             url,
@@ -60,7 +64,9 @@ class YtDlpRunner(
             "%(.{id,title,uploader,duration,url})j",
             "--no-warnings",
         )
-        parseHits(run(args, "playlist").stdout)
+        val hits = parseHits(run(args, "playlist").stdout)
+        AppLog.i("yt-dlp", "playlist → ${hits.size} items")
+        hits
     }
 
     suspend fun downloadAudio(
@@ -70,12 +76,15 @@ class YtDlpRunner(
         fallbackQuality: String,
         onProgress: (Float) -> Unit = {},
     ): DownloadResult = withContext(Dispatchers.IO) {
+        AppLog.i("yt-dlp", "download job=$jobId preferFlac=$preferFlac quality=$fallbackQuality")
+        AppLog.d("yt-dlp", "input=$urlOrQuery")
         binaryManager.ensureBinaries()
         val input = when {
             urlOrQuery.startsWith("http") || urlOrQuery.startsWith("ytsearch") -> urlOrQuery
             else -> "ytsearch1:$urlOrQuery"
         }
         fun attempt(flac: Boolean): DownloadResult {
+            if (!flac) AppLog.w("yt-dlp", "job=$jobId fallback (no FLAC)")
             val formatArgs = if (flac) {
                 listOf("-f", "bestaudio/best", "--extract-audio", "--audio-format", "flac", "--audio-quality", "0")
             } else {
@@ -102,6 +111,7 @@ class YtDlpRunner(
             }
             val result = run(args, jobId, onProgress)
             if (result.exitCode != 0) {
+                AppLog.e("yt-dlp", "job=$jobId exit=${result.exitCode}")
                 if (flac) return attempt(false)
                 error(result.stdout.takeLast(800).ifBlank { "yt-dlp exit ${result.exitCode}" })
             }
@@ -122,6 +132,7 @@ class YtDlpRunner(
                     ?.maxByOrNull { it.lastModified() }
                     ?: error("Download finished but file missing")
             }
+            AppLog.i("yt-dlp", "job=$jobId ok → ${file.name} ($ext)")
             return DownloadResult(file, ext, sanitize(title), artist, durationMs, youtubeId)
         }
         attempt(preferFlac)
@@ -138,6 +149,7 @@ class YtDlpRunner(
         if (!exe.exists()) error("yt-dlp missing — abrí Ajustes y descargá los binarios")
 
         val cmd = listOf(exe.absolutePath) + args
+        AppLog.d("yt-dlp", "exec[$jobId] ${args.joinToString(" ").take(240)}")
         val pb = ProcessBuilder(cmd)
         pb.directory(binaryManager.workDir)
         pb.redirectErrorStream(true)
@@ -151,12 +163,14 @@ class YtDlpRunner(
         val process = try {
             pb.start()
         } catch (e: Exception) {
+            AppLog.e("yt-dlp", "No se pudo ejecutar yt-dlp", e)
             error(
                 "No se pudo ejecutar yt-dlp: ${e.message}. " +
                     "En Ajustes → Reinstalar binarios. (Android no permite ejecutar desde files/)",
             )
         }
         val sb = StringBuilder()
+        var lastLoggedPct = -10
         BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
             var line: String?
             while (reader.readLine().also { line = it } != null) {
@@ -164,16 +178,28 @@ class YtDlpRunner(
                 sb.append(current).append('\n')
                 val m = progressRe.matcher(current)
                 if (m.find()) {
-                    onProgress(m.group(1)?.toFloatOrNull() ?: 0f)
+                    val pct = m.group(1)?.toFloatOrNull() ?: 0f
+                    onProgress(pct)
+                    val bucket = (pct / 10).toInt() * 10
+                    if (bucket >= lastLoggedPct + 10) {
+                        lastLoggedPct = bucket
+                        AppLog.d("yt-dlp", "[$jobId] $bucket%")
+                    }
+                } else {
+                    val trimmed = current.trim()
+                    if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) {
+                        AppLog.d("yt-dlp", "[$jobId] $trimmed")
+                    }
                 }
             }
         }
         val finished = process.waitFor(60, TimeUnit.MINUTES)
         if (!finished) {
             process.destroyForcibly()
+            AppLog.e("yt-dlp", "timeout job=$jobId")
             error("yt-dlp timed out ($jobId)")
         }
-        Log.d("YtDlpRunner", "job=$jobId exit=${process.exitValue()}")
+        AppLog.i("yt-dlp", "job=$jobId exit=${process.exitValue()}")
         return RunResult(process.exitValue(), sb.toString())
     }
 

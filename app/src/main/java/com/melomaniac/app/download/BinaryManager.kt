@@ -2,7 +2,7 @@ package com.melomaniac.app.download
 
 import android.content.Context
 import android.system.Os
-import android.util.Log
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -41,10 +41,14 @@ class BinaryManager(private val context: Context) {
     fun isReady(): Boolean = ytdlpFile.exists() && ytdlpFile.canExecute() && ytdlpFile.length() > 1_000_000
 
     suspend fun ensureBinaries(onStatus: (String) -> Unit = {}): Unit = withContext(Dispatchers.IO) {
+        fun status(msg: String) {
+            AppLog.i(TAG, msg)
+            onStatus(msg)
+        }
         cleanupLegacyFilesDirBin()
 
         if (!isReady()) {
-            onStatus("Descargando yt-dlp…")
+            status("Descargando yt-dlp…")
             installBinary(
                 url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64",
                 dest = ytdlpFile,
@@ -54,38 +58,46 @@ class BinaryManager(private val context: Context) {
         }
 
         if (!ffmpegFile.exists() || ffmpegFile.length() < 100_000) {
-            onStatus("Descargando ffmpeg…")
+            status("Descargando ffmpeg…")
             try {
                 installBinary(
                     url = "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-linux-arm64",
                     dest = ffmpegFile,
                 )
             } catch (e: Exception) {
-                Log.w(TAG, "ffmpeg download failed", e)
-                onStatus("ffmpeg no se pudo descargar automáticamente")
+                AppLog.w(TAG, "ffmpeg download failed", e)
+                status("ffmpeg no se pudo descargar automáticamente")
             }
         } else {
             makeExecutable(ffmpegFile)
         }
 
         verifyYtDlpRuns()
-        onStatus("Binarios listos")
+        status("Binarios listos")
     }
 
     suspend fun updateYtDlp(onStatus: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
-        onStatus("Actualizando yt-dlp…")
+        fun status(msg: String) {
+            AppLog.i(TAG, msg)
+            onStatus(msg)
+        }
+        status("Actualizando yt-dlp…")
         if (ytdlpFile.exists()) ytdlpFile.delete()
         installBinary(
             url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64",
             dest = ytdlpFile,
         )
         verifyYtDlpRuns()
-        onStatus("yt-dlp actualizado")
+        status("yt-dlp actualizado")
     }
 
     /** Force re-download (call from Settings if exec still fails). */
     suspend fun reinstallAll(onStatus: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
-        onStatus("Reinstalando binarios…")
+        fun status(msg: String) {
+            AppLog.i(TAG, msg)
+            onStatus(msg)
+        }
+        status("Reinstalando binarios…")
         ytdlpFile.delete()
         ffmpegFile.delete()
         stagingDir.deleteRecursively()
@@ -98,11 +110,12 @@ class BinaryManager(private val context: Context) {
         val legacy = File(context.filesDir, "bin")
         if (legacy.exists()) {
             legacy.deleteRecursively()
-            Log.i(TAG, "Removed legacy filesDir/bin (not executable on Android 10+)")
+            AppLog.i(TAG, "Removed legacy filesDir/bin (not executable on Android 10+)")
         }
     }
 
     private fun installBinary(url: String, dest: File) {
+        AppLog.d(TAG, "install ${dest.name} from $url")
         val staging = File(stagingDir, dest.name + ".download")
         if (staging.exists()) staging.delete()
         download(url, staging)
@@ -117,6 +130,7 @@ class BinaryManager(private val context: Context) {
         if (!dest.exists() || dest.length() == 0L) {
             error("Binary install failed for ${dest.name}")
         }
+        AppLog.i(TAG, "installed ${dest.name} (${dest.length()} bytes, exec=${dest.canExecute()})")
     }
 
     private fun makeExecutable(file: File) {
@@ -125,7 +139,7 @@ class BinaryManager(private val context: Context) {
             // 0755
             Os.chmod(file.absolutePath, "0755".toInt(8))
         } catch (e: Exception) {
-            Log.w(TAG, "Os.chmod failed for ${file.name}, trying File API", e)
+            AppLog.w(TAG, "Os.chmod failed for ${file.name}, trying File API", e)
             file.setExecutable(true, false)
             file.setReadable(true, false)
         }
@@ -135,7 +149,7 @@ class BinaryManager(private val context: Context) {
                 val p = Runtime.getRuntime().exec(arrayOf("chmod", "755", file.absolutePath))
                 p.waitFor()
             } catch (e: Exception) {
-                Log.w(TAG, "chmod process failed", e)
+                AppLog.w(TAG, "chmod process failed", e)
             }
         }
     }
@@ -157,8 +171,9 @@ class BinaryManager(private val context: Context) {
             if (code != 0) {
                 error("yt-dlp no arranca (exit $code): ${out.take(300)}")
             }
-            Log.i(TAG, "yt-dlp ok: ${out.trim().take(80)}")
+            AppLog.i(TAG, "yt-dlp ok: ${out.trim().take(80)}")
         } catch (e: Exception) {
+            AppLog.e(TAG, "verify failed", e)
             throw IllegalStateException(
                 "No se puede ejecutar yt-dlp (${e.message}). " +
                     "En Ajustes tocá «Reinstalar binarios». " +
