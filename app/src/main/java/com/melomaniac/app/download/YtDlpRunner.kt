@@ -40,6 +40,7 @@ class YtDlpRunner(
         request.addOption("--flat-playlist")
         request.addOption("--print", "%(.{id,title,uploader,duration,url})j")
         request.addOption("--no-warnings")
+        applyYoutubeHardening(request, CLIENT_STRATEGIES.first())
         val out = execute(request, "search").out
         val hits = parseHits(out)
         AppLog.i("yt-dlp", "search → ${hits.size} hits")
@@ -54,6 +55,7 @@ class YtDlpRunner(
         request.addOption("--yes-playlist")
         request.addOption("--print", "%(.{id,title,uploader,duration,url})j")
         request.addOption("--no-warnings")
+        applyYoutubeHardening(request, CLIENT_STRATEGIES.first())
         val hits = parseHits(execute(request, "playlist").out)
         AppLog.i("yt-dlp", "playlist → ${hits.size} items")
         hits
@@ -74,44 +76,23 @@ class YtDlpRunner(
             else -> "ytsearch1:$urlOrQuery"
         }
 
-        fun attempt(flac: Boolean): DownloadResult {
+        fun attempt(flac: Boolean, strategyIndex: Int): DownloadResult {
+            val strategy = CLIENT_STRATEGIES[strategyIndex]
             if (!flac) AppLog.w("yt-dlp", "job=$jobId fallback (no FLAC)")
+            AppLog.i("yt-dlp", "job=$jobId client strategy #${strategyIndex + 1}")
             val before = musicDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
             val outTemplate = File(musicDir, "%(title).80B-%(id)s.%(ext)s").absolutePath
             val request = YoutubeDLRequest(input)
-            if (flac) {
-                request.addOption("-f", "bestaudio/best")
-                request.addOption("--extract-audio")
-                request.addOption("--audio-format", "flac")
-                request.addOption("--audio-quality", "0")
-            } else {
-                when (fallbackQuality) {
-                    "320" -> {
-                        request.addOption("-f", "bestaudio/best")
-                        request.addOption("--extract-audio")
-                        request.addOption("--audio-format", "mp3")
-                        request.addOption("--audio-quality", "0")
-                    }
-                    "128" -> {
-                        request.addOption("-f", "bestaudio[abr<=128]/bestaudio/best")
-                        request.addOption("--extract-audio")
-                        request.addOption("--audio-format", "m4a")
-                    }
-                    else -> {
-                        request.addOption("-f", "bestaudio/best")
-                        request.addOption("--extract-audio")
-                        request.addOption("--audio-format", "m4a")
-                    }
-                }
-            }
+            applyAudioFormat(request, flac, fallbackQuality)
             request.addOption("--no-playlist")
             request.addOption("--newline")
             request.addOption("--print-json")
             request.addOption("--no-warnings")
             request.addOption("-o", outTemplate)
+            applyYoutubeHardening(request, strategy)
 
             val response = try {
-                execute(request, jobId) { progress, _, line ->
+                execute(request, "$jobId-$strategyIndex") { progress, _, line ->
                     if (progress > 0f) onProgress(progress)
                     val trimmed = line?.trim().orEmpty()
                     if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) {
@@ -119,8 +100,17 @@ class YtDlpRunner(
                     }
                 }
             } catch (e: Exception) {
-                AppLog.e("yt-dlp", "job=$jobId failed", e)
-                if (flac) return attempt(false)
+                AppLog.e("yt-dlp", "job=$jobId strategy#$strategyIndex failed", e)
+                val msg = e.message.orEmpty()
+                val is403 = msg.contains("403") || msg.contains("Forbidden", ignoreCase = true)
+                if (is403 && strategyIndex + 1 < CLIENT_STRATEGIES.size) {
+                    AppLog.w("yt-dlp", "403 → next player_client")
+                    return attempt(flac, strategyIndex + 1)
+                }
+                if (flac) return attempt(false, 0)
+                if (!flac && strategyIndex + 1 < CLIENT_STRATEGIES.size) {
+                    return attempt(false, strategyIndex + 1)
+                }
                 throw e
             }
 
@@ -149,7 +139,64 @@ class YtDlpRunner(
             AppLog.i("yt-dlp", "job=$jobId ok → ${file.name} ($ext)")
             return DownloadResult(file, ext, sanitize(title), artist, durationMs, youtubeId)
         }
-        attempt(preferFlac)
+        attempt(preferFlac, 0)
+    }
+
+    private fun applyAudioFormat(request: YoutubeDLRequest, flac: Boolean, fallbackQuality: String) {
+        if (flac) {
+            // Prefer progressive/hls audio that still works when SABR blocks https progressive.
+            request.addOption(
+                "-f",
+                "bestaudio[protocol^=http]/bestaudio[protocol=m3u8_native]/bestaudio/best",
+            )
+            request.addOption("--extract-audio")
+            request.addOption("--audio-format", "flac")
+            request.addOption("--audio-quality", "0")
+            return
+        }
+        when (fallbackQuality) {
+            "320" -> {
+                request.addOption(
+                    "-f",
+                    "bestaudio[protocol^=http]/bestaudio[protocol=m3u8_native]/bestaudio/best",
+                )
+                request.addOption("--extract-audio")
+                request.addOption("--audio-format", "mp3")
+                request.addOption("--audio-quality", "0")
+            }
+            "128" -> {
+                request.addOption(
+                    "-f",
+                    "bestaudio[abr<=128][protocol^=http]/bestaudio[protocol=m3u8_native]/bestaudio/best",
+                )
+                request.addOption("--extract-audio")
+                request.addOption("--audio-format", "m4a")
+            }
+            else -> {
+                request.addOption(
+                    "-f",
+                    "bestaudio[protocol^=http]/bestaudio[protocol=m3u8_native]/bestaudio/best",
+                )
+                request.addOption("--extract-audio")
+                request.addOption("--audio-format", "m4a")
+            }
+        }
+    }
+
+    private fun applyYoutubeHardening(request: YoutubeDLRequest, extractorArgs: String) {
+        request.addOption("--extractor-args", extractorArgs)
+        request.addOption("--retries", "10")
+        request.addOption("--fragment-retries", "10")
+        request.addOption("--retry-sleep", "http:exp=1:8")
+        request.addOption("--socket-timeout", "30")
+        request.addOption("--force-ipv4")
+        request.addOption("--no-check-certificates")
+        request.addOption(
+            "--user-agent",
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 " +
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        )
+        request.addOption("--referer", "https://www.youtube.com/")
     }
 
     private data class ExecResult(val out: String, val err: String, val exitCode: Int)
@@ -170,7 +217,7 @@ class YtDlpRunner(
         AppLog.i("yt-dlp", "job=$processId exit=${response.exitCode}")
         if (response.exitCode != 0) {
             val detail = (response.err.ifBlank { response.out }).takeLast(800)
-            error("yt-dlp exit ${response.exitCode}: $detail")
+            error(detail.ifBlank { "yt-dlp exit ${response.exitCode}" })
         }
         return ExecResult(response.out, response.err, response.exitCode)
     }
@@ -219,4 +266,17 @@ class YtDlpRunner(
 
     private fun sanitize(name: String): String =
         name.replace(Regex("[<>:\"/\\\\|?*\\x00-\\x1F]"), "_").trim().take(120).ifBlank { "track" }
+
+    companion object {
+        /**
+         * YouTube keeps rotating which logged-out clients work.
+         * Avoid android_sdkless (known 403 source); try VR / iOS HLS / TV.
+         */
+        private val CLIENT_STRATEGIES = listOf(
+            "youtube:player_client=android_vr,tv,ios,-android_sdkless",
+            "youtube:player_client=ios,tv,-android_sdkless;formats=missing_pot",
+            "youtube:player_client=tv,web_safari,-android_sdkless",
+            "youtube:player_client=default,-android_sdkless",
+        )
+    }
 }

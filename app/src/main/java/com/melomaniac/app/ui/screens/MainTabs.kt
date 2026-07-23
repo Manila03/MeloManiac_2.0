@@ -363,7 +363,7 @@ fun SettingsScreen(container: AppContainer) {
                 }
             }
         })
-        GhostButton("Actualizar yt-dlp", onClick = {
+        GhostButton("Actualizar yt-dlp (nightly)", onClick = {
             scope.launch {
                 try {
                     AppBusy.run("Actualizando yt-dlp…") {

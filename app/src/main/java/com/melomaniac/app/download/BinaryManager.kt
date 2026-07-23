@@ -16,6 +16,9 @@ import kotlinx.coroutines.withContext
  */
 class BinaryManager(private val context: Context) {
     private val mutex = Mutex()
+    private val prefs by lazy {
+        context.getSharedPreferences("melomaniac_binaries", Context.MODE_PRIVATE)
+    }
 
     @Volatile
     private var ready = false
@@ -26,27 +29,26 @@ class BinaryManager(private val context: Context) {
                 AppLog.i(TAG, msg)
                 onStatus(msg)
             }
-            if (ready) {
-                status("Binarios listos")
-                return@withLock
+            if (!ready) {
+                status("Inicializando yt-dlp…")
+                try {
+                    YoutubeDL.getInstance().init(context.applicationContext)
+                    status("Inicializando ffmpeg…")
+                    FFmpeg.getInstance().init(context.applicationContext)
+                    ready = true
+                } catch (e: YoutubeDLException) {
+                    AppLog.e(TAG, "init failed", e)
+                    throw IllegalStateException(
+                        "No se pudo inicializar yt-dlp/ffmpeg: ${e.message}",
+                        e,
+                    )
+                } catch (e: Exception) {
+                    AppLog.e(TAG, "init failed", e)
+                    throw e
+                }
             }
-            status("Inicializando yt-dlp…")
-            try {
-                YoutubeDL.getInstance().init(context.applicationContext)
-                status("Inicializando ffmpeg…")
-                FFmpeg.getInstance().init(context.applicationContext)
-                ready = true
-                status("Binarios listos")
-            } catch (e: YoutubeDLException) {
-                AppLog.e(TAG, "init failed", e)
-                throw IllegalStateException(
-                    "No se pudo inicializar yt-dlp/ffmpeg: ${e.message}",
-                    e,
-                )
-            } catch (e: Exception) {
-                AppLog.e(TAG, "init failed", e)
-                throw e
-            }
+            maybeAutoUpdate(onStatus)
+            status("Binarios listos")
         }
     }
 
@@ -57,12 +59,13 @@ class BinaryManager(private val context: Context) {
                 onStatus(msg)
             }
             ensureLocked(onStatus)
-            status("Actualizando yt-dlp…")
+            status("Actualizando yt-dlp (nightly)…")
             try {
                 val updateStatus = YoutubeDL.getInstance().updateYoutubeDL(
                     context.applicationContext,
-                    YoutubeDL.UpdateChannel.STABLE,
+                    YoutubeDL.UpdateChannel.NIGHTLY,
                 )
+                prefs.edit().putLong(PREF_LAST_UPDATE, System.currentTimeMillis()).apply()
                 status("yt-dlp: $updateStatus")
             } catch (e: Exception) {
                 AppLog.e(TAG, "update failed", e)
@@ -80,11 +83,31 @@ class BinaryManager(private val context: Context) {
             }
             status("Reinstalando binarios…")
             ready = false
-            // Delete legacy ProcessBuilder installs if any remain.
             FileCleanup.deleteQuietly(context.filesDir.resolve("bin"))
             FileCleanup.deleteQuietly(context.filesDir.resolve("bin-staging"))
             FileCleanup.deleteQuietly(context.codeCacheDir.resolve("bin"))
             ensureLocked(onStatus)
+            maybeAutoUpdate(onStatus, force = true)
+        }
+    }
+
+    private fun maybeAutoUpdate(onStatus: (String) -> Unit, force: Boolean = false) {
+        val last = prefs.getLong(PREF_LAST_UPDATE, 0L)
+        val stale = System.currentTimeMillis() - last > UPDATE_EVERY_MS
+        if (!force && !stale) return
+        onStatus("Actualizando yt-dlp (anti-403)…")
+        try {
+            val updateStatus = YoutubeDL.getInstance().updateYoutubeDL(
+                context.applicationContext,
+                YoutubeDL.UpdateChannel.NIGHTLY,
+            )
+            prefs.edit().putLong(PREF_LAST_UPDATE, System.currentTimeMillis()).apply()
+            AppLog.i(TAG, "auto-update: $updateStatus")
+            onStatus("yt-dlp actualizado: $updateStatus")
+        } catch (e: Exception) {
+            // Don't fail downloads if update itself fails; bundled version may still work.
+            AppLog.w(TAG, "auto-update skipped", e)
+            onStatus("Update yt-dlp omitido: ${e.message}")
         }
     }
 
@@ -112,5 +135,7 @@ class BinaryManager(private val context: Context) {
 
     companion object {
         private const val TAG = "BinaryManager"
+        private const val PREF_LAST_UPDATE = "ytdlp_last_update_ms"
+        private const val UPDATE_EVERY_MS = 12L * 60L * 60L * 1000L // 12h
     }
 }
