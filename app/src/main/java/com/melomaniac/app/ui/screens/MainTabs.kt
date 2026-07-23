@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Text
@@ -21,13 +23,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.melomaniac.app.BuildConfig
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.AppSettings
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.TrackRow
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
+import com.melomaniac.app.update.ReleaseUpdate
+import com.melomaniac.app.update.UpdateCheckResult
 import com.melomaniac.app.ui.Muted
 import com.melomaniac.app.ui.PrimaryButton
 import com.melomaniac.app.ui.ProgressBar
@@ -178,7 +184,10 @@ fun SettingsScreen(container: AppContainer) {
     var settings by remember { mutableStateOf(AppSettings()) }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var pendingUpdate by remember { mutableStateOf<ReleaseUpdate?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val updater = container.appUpdater
 
     LaunchedEffect(Unit) {
         settings = container.settings.get()
@@ -189,8 +198,75 @@ fun SettingsScreen(container: AppContainer) {
         scope.launch { container.settings.update(patch) }
     }
 
-    Column(Modifier.padding(16.dp).fillMaxSize()) {
+    fun installPending(update: ReleaseUpdate) {
+        scope.launch {
+            busy = true
+            try {
+                if (!updater.canInstallPackages()) {
+                    status = "Permití instalar apps de MeloManiac y volvé a tocar Instalar"
+                    context.startActivity(updater.intentToAllowInstalls())
+                    return@launch
+                }
+                val apk = updater.downloadApk(update) { status = it }
+                updater.installApk(apk)
+                status = "Seguí el instalador de Android"
+            } catch (e: Exception) {
+                status = e.message
+            } finally {
+                busy = false
+            }
+        }
+    }
+
+    Column(
+        Modifier
+            .padding(16.dp)
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
         ScreenTitle("Ajustes")
+        Muted("Versión instalada: ${BuildConfig.VERSION_NAME}")
+        Text("Actualizaciones", color = TextSecondary, modifier = Modifier.padding(top = 12.dp))
+        PrimaryButton(
+            if (pendingUpdate != null) {
+                "Instalar ${pendingUpdate!!.versionName}"
+            } else {
+                "Buscar actualizaciones"
+            },
+            onClick = {
+                val ready = pendingUpdate
+                if (ready != null) {
+                    installPending(ready)
+                    return@PrimaryButton
+                }
+                scope.launch {
+                    busy = true
+                    pendingUpdate = null
+                    status = "Consultando GitHub…"
+                    when (val result = updater.checkForUpdate()) {
+                        is UpdateCheckResult.UpToDate -> {
+                            status = "Ya tenés la última versión (${BuildConfig.VERSION_NAME})"
+                        }
+                        is UpdateCheckResult.Available -> {
+                            pendingUpdate = result.update
+                            status = "Nueva versión ${result.update.versionName} disponible"
+                        }
+                        is UpdateCheckResult.Failed -> {
+                            status = result.message
+                        }
+                    }
+                    busy = false
+                }
+            },
+            enabled = !busy,
+        )
+        if (pendingUpdate != null) {
+            GhostButton("Cancelar actualización") {
+                pendingUpdate = null
+                status = null
+            }
+        }
+
         Muted("Preferimos FLAC. La calidad de abajo aplica si FLAC no está disponible.")
         Text("Calidad fallback", color = TextSecondary)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -265,6 +341,6 @@ fun SettingsScreen(container: AppContainer) {
                 }
             }
         })
-        status?.let { Text(it, color = Accent, modifier = Modifier.padding(top = 8.dp)) }
+        status?.let { Text(it, color = Accent, modifier = Modifier.padding(top = 8.dp, bottom = 24.dp)) }
     }
 }

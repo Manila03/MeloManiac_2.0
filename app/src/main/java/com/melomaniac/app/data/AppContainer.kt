@@ -6,6 +6,7 @@ import com.melomaniac.app.download.DownloadQueue
 import com.melomaniac.app.download.SpotifyApi
 import com.melomaniac.app.download.YtDlpRunner
 import com.melomaniac.app.player.PlayerController
+import com.melomaniac.app.update.AppUpdater
 import java.io.File
 
 class AppContainer(context: Context) {
@@ -17,6 +18,7 @@ class AppContainer(context: Context) {
     val downloadDao = db.downloadDao()
 
     val binaryManager = BinaryManager(appContext)
+    val appUpdater = AppUpdater(appContext)
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
     val spotify = SpotifyApi()
