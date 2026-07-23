@@ -1,194 +1,112 @@
 package com.melomaniac.app.download
 
 import android.content.Context
-import android.system.Os
 import com.melomaniac.app.util.AppLog
+import com.yausername.ffmpeg.FFmpeg
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
- * Android blocks executing binaries from writable [Context.getFilesDir] (error=13).
- * We install into [Context.getCodeCacheDir], which allows execution, and chmod via Os.
+ * Initializes Android-compatible yt-dlp + ffmpeg via youtubedl-android.
+ * Binaries live in the APK native lib dir (executable on Android 10+), not in filesDir.
  */
 class BinaryManager(private val context: Context) {
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(5, TimeUnit.MINUTES)
-        .build()
+    private val mutex = Mutex()
 
-    /** Writable staging area (downloads land here first). */
-    private val stagingDir: File
-        get() = File(context.filesDir, "bin-staging").also { if (!it.exists()) it.mkdirs() }
-
-    /**
-     * Executable install dir. codeCacheDir is allowed for exec on modern Android;
-     * filesDir/bin is not (SELinux / W^X → Permission denied).
-     */
-    private val binDir: File
-        get() = File(context.codeCacheDir, "bin").also { if (!it.exists()) it.mkdirs() }
-
-    /** Working HOME for yt-dlp config/cookies (must be writable). */
-    val workDir: File
-        get() = File(context.filesDir, "ytdlp-home").also { if (!it.exists()) it.mkdirs() }
-
-    val ytdlpFile: File get() = File(binDir, "ytdlp")
-    val ffmpegFile: File get() = File(binDir, "ffmpeg")
-
-    fun isReady(): Boolean = ytdlpFile.exists() && ytdlpFile.canExecute() && ytdlpFile.length() > 1_000_000
+    @Volatile
+    private var ready = false
 
     suspend fun ensureBinaries(onStatus: (String) -> Unit = {}): Unit = withContext(Dispatchers.IO) {
-        fun status(msg: String) {
-            AppLog.i(TAG, msg)
-            onStatus(msg)
-        }
-        cleanupLegacyFilesDirBin()
-
-        if (!isReady()) {
-            status("Descargando yt-dlp…")
-            installBinary(
-                url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64",
-                dest = ytdlpFile,
-            )
-        } else {
-            makeExecutable(ytdlpFile)
-        }
-
-        if (!ffmpegFile.exists() || ffmpegFile.length() < 100_000) {
-            status("Descargando ffmpeg…")
+        mutex.withLock {
+            fun status(msg: String) {
+                AppLog.i(TAG, msg)
+                onStatus(msg)
+            }
+            if (ready) {
+                status("Binarios listos")
+                return@withLock
+            }
+            status("Inicializando yt-dlp…")
             try {
-                installBinary(
-                    url = "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.0/ffmpeg-linux-arm64",
-                    dest = ffmpegFile,
+                YoutubeDL.getInstance().init(context.applicationContext)
+                status("Inicializando ffmpeg…")
+                FFmpeg.getInstance().init(context.applicationContext)
+                ready = true
+                status("Binarios listos")
+            } catch (e: YoutubeDLException) {
+                AppLog.e(TAG, "init failed", e)
+                throw IllegalStateException(
+                    "No se pudo inicializar yt-dlp/ffmpeg: ${e.message}",
+                    e,
                 )
             } catch (e: Exception) {
-                AppLog.w(TAG, "ffmpeg download failed", e)
-                status("ffmpeg no se pudo descargar automáticamente")
+                AppLog.e(TAG, "init failed", e)
+                throw e
             }
-        } else {
-            makeExecutable(ffmpegFile)
         }
-
-        verifyYtDlpRuns()
-        status("Binarios listos")
     }
 
     suspend fun updateYtDlp(onStatus: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
-        fun status(msg: String) {
-            AppLog.i(TAG, msg)
-            onStatus(msg)
-        }
-        status("Actualizando yt-dlp…")
-        if (ytdlpFile.exists()) ytdlpFile.delete()
-        installBinary(
-            url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64",
-            dest = ytdlpFile,
-        )
-        verifyYtDlpRuns()
-        status("yt-dlp actualizado")
-    }
-
-    /** Force re-download (call from Settings if exec still fails). */
-    suspend fun reinstallAll(onStatus: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
-        fun status(msg: String) {
-            AppLog.i(TAG, msg)
-            onStatus(msg)
-        }
-        status("Reinstalando binarios…")
-        ytdlpFile.delete()
-        ffmpegFile.delete()
-        stagingDir.deleteRecursively()
-        stagingDir.mkdirs()
-        binDir.mkdirs()
-        ensureBinaries(onStatus)
-    }
-
-    private fun cleanupLegacyFilesDirBin() {
-        val legacy = File(context.filesDir, "bin")
-        if (legacy.exists()) {
-            legacy.deleteRecursively()
-            AppLog.i(TAG, "Removed legacy filesDir/bin (not executable on Android 10+)")
-        }
-    }
-
-    private fun installBinary(url: String, dest: File) {
-        AppLog.d(TAG, "install ${dest.name} from $url")
-        val staging = File(stagingDir, dest.name + ".download")
-        if (staging.exists()) staging.delete()
-        download(url, staging)
-
-        if (dest.exists()) dest.delete()
-        dest.parentFile?.mkdirs()
-        if (!staging.renameTo(dest)) {
-            staging.copyTo(dest, overwrite = true)
-            staging.delete()
-        }
-        makeExecutable(dest)
-        if (!dest.exists() || dest.length() == 0L) {
-            error("Binary install failed for ${dest.name}")
-        }
-        AppLog.i(TAG, "installed ${dest.name} (${dest.length()} bytes, exec=${dest.canExecute()})")
-    }
-
-    private fun makeExecutable(file: File) {
-        if (!file.exists()) return
-        try {
-            // 0755
-            Os.chmod(file.absolutePath, "0755".toInt(8))
-        } catch (e: Exception) {
-            AppLog.w(TAG, "Os.chmod failed for ${file.name}, trying File API", e)
-            file.setExecutable(true, false)
-            file.setReadable(true, false)
-        }
-        // Confirm; if still not executable, last-resort chmod via toybox
-        if (!file.canExecute()) {
+        mutex.withLock {
+            fun status(msg: String) {
+                AppLog.i(TAG, msg)
+                onStatus(msg)
+            }
+            ensureLocked(onStatus)
+            status("Actualizando yt-dlp…")
             try {
-                val p = Runtime.getRuntime().exec(arrayOf("chmod", "755", file.absolutePath))
-                p.waitFor()
+                val updateStatus = YoutubeDL.getInstance().updateYoutubeDL(
+                    context.applicationContext,
+                    YoutubeDL.UpdateChannel.STABLE,
+                )
+                status("yt-dlp: $updateStatus")
             } catch (e: Exception) {
-                AppLog.w(TAG, "chmod process failed", e)
+                AppLog.e(TAG, "update failed", e)
+                throw e
             }
         }
     }
 
-    private fun verifyYtDlpRuns() {
-        if (!ytdlpFile.exists()) error("yt-dlp no instalado")
-        makeExecutable(ytdlpFile)
-        val pb = ProcessBuilder(ytdlpFile.absolutePath, "--version")
-        pb.directory(workDir)
-        pb.redirectErrorStream(true)
-        val env = pb.environment()
-        env["HOME"] = workDir.absolutePath
-        env["TMPDIR"] = context.cacheDir.absolutePath
-        env["PATH"] = binDir.absolutePath + ":" + (env["PATH"] ?: "/system/bin")
-        try {
-            val process = pb.start()
-            val out = process.inputStream.bufferedReader().readText()
-            val code = process.waitFor()
-            if (code != 0) {
-                error("yt-dlp no arranca (exit $code): ${out.take(300)}")
+    /** Re-init native packages (clears ready flag and initializes again). */
+    suspend fun reinstallAll(onStatus: (String) -> Unit = {}) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            fun status(msg: String) {
+                AppLog.i(TAG, msg)
+                onStatus(msg)
             }
-            AppLog.i(TAG, "yt-dlp ok: ${out.trim().take(80)}")
-        } catch (e: Exception) {
-            AppLog.e(TAG, "verify failed", e)
-            throw IllegalStateException(
-                "No se puede ejecutar yt-dlp (${e.message}). " +
-                    "En Ajustes tocá «Reinstalar binarios». " +
-                    "path=${ytdlpFile.absolutePath}",
-                e,
-            )
+            status("Reinstalando binarios…")
+            ready = false
+            // Delete legacy ProcessBuilder installs if any remain.
+            FileCleanup.deleteQuietly(context.filesDir.resolve("bin"))
+            FileCleanup.deleteQuietly(context.filesDir.resolve("bin-staging"))
+            FileCleanup.deleteQuietly(context.codeCacheDir.resolve("bin"))
+            ensureLocked(onStatus)
         }
     }
 
-    private fun download(url: String, dest: File) {
-        val req = Request.Builder().url(url).build()
-        client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Download failed ${resp.code} for $url")
-            val body = resp.body ?: error("Empty body")
-            dest.outputStream().use { out -> body.byteStream().copyTo(out) }
+    private fun ensureLocked(onStatus: (String) -> Unit) {
+        if (ready) {
+            onStatus("Binarios listos")
+            return
+        }
+        onStatus("Inicializando yt-dlp…")
+        YoutubeDL.getInstance().init(context.applicationContext)
+        onStatus("Inicializando ffmpeg…")
+        FFmpeg.getInstance().init(context.applicationContext)
+        ready = true
+        onStatus("Binarios listos")
+        AppLog.i(TAG, "init ok")
+    }
+
+    private object FileCleanup {
+        fun deleteQuietly(file: java.io.File) {
+            if (!file.exists()) return
+            runCatching { file.deleteRecursively() }
+            AppLog.i(TAG, "cleaned ${file.absolutePath}")
         }
     }
 

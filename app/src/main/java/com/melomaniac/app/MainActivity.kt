@@ -37,6 +37,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.TrackRow
+import com.melomaniac.app.ui.BusyOverlay
 import com.melomaniac.app.ui.MiniPlayerBar
 import com.melomaniac.app.ui.screens.AlbumDetailScreen
 import com.melomaniac.app.ui.screens.AlbumsScreen
@@ -60,6 +61,7 @@ import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.ui.theme.Background
 import com.melomaniac.app.ui.theme.MeloTheme
 import com.melomaniac.app.ui.theme.TextMuted
+import com.melomaniac.app.util.AppBusy
 import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.launch
 
@@ -102,7 +104,9 @@ class MainActivity : ComponentActivity() {
         AppLog.i("Share", "Incoming link: $link")
         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
             try {
-                val (_, msg) = container.downloadQueue.enqueueFromUserInput(link)
+                val (_, msg) = AppBusy.run("Encolando link…") {
+                    container.downloadQueue.enqueueFromUserInput(link)
+                }
                 AppLog.i("Share", msg)
                 Toast.makeText(this@MainActivity, msg, Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
@@ -136,11 +140,13 @@ fun MeloApp(
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
     val showTabs = route in setOf("library", "search", "downloads", "logs", "settings")
+    val busyMessage by AppBusy.message.collectAsState()
 
     fun play(tracks: List<TrackRow>, index: Int) {
         player.playTracks(tracks, index)
     }
 
+    Box(Modifier.fillMaxSize()) {
     Scaffold(
         containerColor = Background,
         bottomBar = {
@@ -237,5 +243,7 @@ fun MeloApp(
                 }
             }
         }
+    }
+        busyMessage?.let { BusyOverlay(it) }
     }
 }

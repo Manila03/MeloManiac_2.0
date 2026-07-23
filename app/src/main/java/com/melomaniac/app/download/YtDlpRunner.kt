@@ -1,14 +1,12 @@
 package com.melomaniac.app.download
 
 import com.melomaniac.app.util.AppLog
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
-import java.util.concurrent.TimeUnit
-import java.util.regex.Pattern
 
 data class YtHit(
     val id: String,
@@ -31,8 +29,6 @@ class YtDlpRunner(
     private val binaryManager: BinaryManager,
     private val musicDir: File,
 ) {
-    private val progressRe = Pattern.compile("(\\d+(?:\\.\\d+)?)%")
-
     init {
         if (!musicDir.exists()) musicDir.mkdirs()
     }
@@ -40,14 +36,11 @@ class YtDlpRunner(
     suspend fun search(query: String, limit: Int = 8): List<YtHit> = withContext(Dispatchers.IO) {
         AppLog.i("yt-dlp", "search: $query (limit=$limit)")
         binaryManager.ensureBinaries()
-        val args = listOf(
-            "ytsearch$limit:$query",
-            "--flat-playlist",
-            "--print",
-            "%(.{id,title,uploader,duration,url})j",
-            "--no-warnings",
-        )
-        val out = run(args, "search").stdout
+        val request = YoutubeDLRequest("ytsearch$limit:$query")
+        request.addOption("--flat-playlist")
+        request.addOption("--print", "%(.{id,title,uploader,duration,url})j")
+        request.addOption("--no-warnings")
+        val out = execute(request, "search").out
         val hits = parseHits(out)
         AppLog.i("yt-dlp", "search → ${hits.size} hits")
         hits
@@ -56,15 +49,12 @@ class YtDlpRunner(
     suspend fun listPlaylist(url: String): List<YtHit> = withContext(Dispatchers.IO) {
         AppLog.i("yt-dlp", "list playlist: $url")
         binaryManager.ensureBinaries()
-        val args = listOf(
-            url,
-            "--flat-playlist",
-            "--yes-playlist",
-            "--print",
-            "%(.{id,title,uploader,duration,url})j",
-            "--no-warnings",
-        )
-        val hits = parseHits(run(args, "playlist").stdout)
+        val request = YoutubeDLRequest(url)
+        request.addOption("--flat-playlist")
+        request.addOption("--yes-playlist")
+        request.addOption("--print", "%(.{id,title,uploader,duration,url})j")
+        request.addOption("--no-warnings")
+        val hits = parseHits(execute(request, "playlist").out)
         AppLog.i("yt-dlp", "playlist → ${hits.size} items")
         hits
     }
@@ -83,39 +73,58 @@ class YtDlpRunner(
             urlOrQuery.startsWith("http") || urlOrQuery.startsWith("ytsearch") -> urlOrQuery
             else -> "ytsearch1:$urlOrQuery"
         }
+
         fun attempt(flac: Boolean): DownloadResult {
             if (!flac) AppLog.w("yt-dlp", "job=$jobId fallback (no FLAC)")
-            val formatArgs = if (flac) {
-                listOf("-f", "bestaudio/best", "--extract-audio", "--audio-format", "flac", "--audio-quality", "0")
+            val before = musicDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
+            val outTemplate = File(musicDir, "%(title).80B-%(id)s.%(ext)s").absolutePath
+            val request = YoutubeDLRequest(input)
+            if (flac) {
+                request.addOption("-f", "bestaudio/best")
+                request.addOption("--extract-audio")
+                request.addOption("--audio-format", "flac")
+                request.addOption("--audio-quality", "0")
             } else {
                 when (fallbackQuality) {
-                    "320" -> listOf("-f", "bestaudio/best", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0")
-                    "128" -> listOf("-f", "bestaudio[abr<=128]/bestaudio/best", "--extract-audio", "--audio-format", "m4a")
-                    else -> listOf("-f", "bestaudio/best", "--extract-audio", "--audio-format", "m4a")
+                    "320" -> {
+                        request.addOption("-f", "bestaudio/best")
+                        request.addOption("--extract-audio")
+                        request.addOption("--audio-format", "mp3")
+                        request.addOption("--audio-quality", "0")
+                    }
+                    "128" -> {
+                        request.addOption("-f", "bestaudio[abr<=128]/bestaudio/best")
+                        request.addOption("--extract-audio")
+                        request.addOption("--audio-format", "m4a")
+                    }
+                    else -> {
+                        request.addOption("-f", "bestaudio/best")
+                        request.addOption("--extract-audio")
+                        request.addOption("--audio-format", "m4a")
+                    }
                 }
             }
-            val outTemplate = File(musicDir, "%(title).80B-%(id)s.%(ext)s").absolutePath
-            val args = buildList {
-                addAll(formatArgs)
-                add("--no-playlist")
-                add("--newline")
-                add("--print-json")
-                add("--no-warnings")
-                add("-o")
-                add(outTemplate)
-                if (binaryManager.ffmpegFile.exists()) {
-                    add("--ffmpeg-location")
-                    add(binaryManager.ffmpegFile.absolutePath)
+            request.addOption("--no-playlist")
+            request.addOption("--newline")
+            request.addOption("--print-json")
+            request.addOption("--no-warnings")
+            request.addOption("-o", outTemplate)
+
+            val response = try {
+                execute(request, jobId) { progress, _, line ->
+                    if (progress > 0f) onProgress(progress)
+                    val trimmed = line?.trim().orEmpty()
+                    if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) {
+                        AppLog.d("yt-dlp", "[$jobId] $trimmed")
+                    }
                 }
-                add(input)
-            }
-            val result = run(args, jobId, onProgress)
-            if (result.exitCode != 0) {
-                AppLog.e("yt-dlp", "job=$jobId exit=${result.exitCode}")
+            } catch (e: Exception) {
+                AppLog.e("yt-dlp", "job=$jobId failed", e)
                 if (flac) return attempt(false)
-                error(result.stdout.takeLast(800).ifBlank { "yt-dlp exit ${result.exitCode}" })
+                throw e
             }
-            val info = extractJson(result.stdout)
+
+            val info = extractJson(response.out)
             val title = info?.optString("title")?.ifBlank { null } ?: "Unknown"
             val artist = info?.optString("artist")?.ifBlank { null }
                 ?: info?.optString("uploader")?.ifBlank { null }
@@ -125,11 +134,16 @@ class YtDlpRunner(
             val requested = info?.optJSONArray("requested_downloads")
                 ?.optJSONObject(0)
                 ?.optString("filepath")
+            val after = musicDir.listFiles().orEmpty()
             val file = when {
                 !requested.isNullOrBlank() && File(requested).exists() -> File(requested)
-                else -> musicDir.listFiles()
-                    ?.filter { it.extension.lowercase() in listOf("flac", "m4a", "mp3", "opus", "webm") }
-                    ?.maxByOrNull { it.lastModified() }
+                else -> after
+                    .filter { it.absolutePath !in before }
+                    .filter { it.extension.lowercase() in listOf("flac", "m4a", "mp3", "opus", "webm") }
+                    .maxByOrNull { it.lastModified() }
+                    ?: after
+                        .filter { it.extension.lowercase() in listOf("flac", "m4a", "mp3", "opus", "webm") }
+                        .maxByOrNull { it.lastModified() }
                     ?: error("Download finished but file missing")
             }
             AppLog.i("yt-dlp", "job=$jobId ok → ${file.name} ($ext)")
@@ -138,69 +152,27 @@ class YtDlpRunner(
         attempt(preferFlac)
     }
 
-    private data class RunResult(val exitCode: Int, val stdout: String)
+    private data class ExecResult(val out: String, val err: String, val exitCode: Int)
 
-    private fun run(
-        args: List<String>,
-        jobId: String,
-        onProgress: (Float) -> Unit = {},
-    ): RunResult {
-        val exe = binaryManager.ytdlpFile
-        if (!exe.exists()) error("yt-dlp missing — abrí Ajustes y descargá los binarios")
-
-        val cmd = listOf(exe.absolutePath) + args
-        AppLog.d("yt-dlp", "exec[$jobId] ${args.joinToString(" ").take(240)}")
-        val pb = ProcessBuilder(cmd)
-        pb.directory(binaryManager.workDir)
-        pb.redirectErrorStream(true)
-        val env = pb.environment()
-        val binPath = exe.parentFile?.absolutePath ?: ""
-        env["PATH"] = "$binPath:/system/bin:" + (env["PATH"] ?: "")
-        env["HOME"] = binaryManager.workDir.absolutePath
-        env["TMPDIR"] = binaryManager.workDir.absolutePath
-        env["XDG_CACHE_HOME"] = File(binaryManager.workDir, "cache").also { it.mkdirs() }.absolutePath
-
-        val process = try {
-            pb.start()
-        } catch (e: Exception) {
-            AppLog.e("yt-dlp", "No se pudo ejecutar yt-dlp", e)
-            error(
-                "No se pudo ejecutar yt-dlp: ${e.message}. " +
-                    "En Ajustes → Reinstalar binarios. (Android no permite ejecutar desde files/)",
-            )
-        }
-        val sb = StringBuilder()
-        var lastLoggedPct = -10
-        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-            var line: String?
-            while (reader.readLine().also { line = it } != null) {
-                val current = line ?: continue
-                sb.append(current).append('\n')
-                val m = progressRe.matcher(current)
-                if (m.find()) {
-                    val pct = m.group(1)?.toFloatOrNull() ?: 0f
-                    onProgress(pct)
-                    val bucket = (pct / 10).toInt() * 10
-                    if (bucket >= lastLoggedPct + 10) {
-                        lastLoggedPct = bucket
-                        AppLog.d("yt-dlp", "[$jobId] $bucket%")
-                    }
-                } else {
-                    val trimmed = current.trim()
-                    if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) {
-                        AppLog.d("yt-dlp", "[$jobId] $trimmed")
-                    }
-                }
+    private fun execute(
+        request: YoutubeDLRequest,
+        processId: String,
+        callback: ((Float, Long, String?) -> Unit)? = null,
+    ): ExecResult {
+        AppLog.d("yt-dlp", "exec[$processId]")
+        val response = if (callback != null) {
+            YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
+                callback(progress, eta, line)
             }
+        } else {
+            YoutubeDL.getInstance().execute(request, processId, null)
         }
-        val finished = process.waitFor(60, TimeUnit.MINUTES)
-        if (!finished) {
-            process.destroyForcibly()
-            AppLog.e("yt-dlp", "timeout job=$jobId")
-            error("yt-dlp timed out ($jobId)")
+        AppLog.i("yt-dlp", "job=$processId exit=${response.exitCode}")
+        if (response.exitCode != 0) {
+            val detail = (response.err.ifBlank { response.out }).takeLast(800)
+            error("yt-dlp exit ${response.exitCode}: $detail")
         }
-        AppLog.i("yt-dlp", "job=$jobId exit=${process.exitValue()}")
-        return RunResult(process.exitValue(), sb.toString())
+        return ExecResult(response.out, response.err, response.exitCode)
     }
 
     private fun parseHits(stdout: String): List<YtHit> {

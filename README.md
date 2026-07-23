@@ -7,7 +7,7 @@ App Android personal para buscar, descargar y reproducir música offline en FLAC
 - Kotlin + Jetpack Compose
 - Room (SQLite)
 - Media3 (reproductor + notificación)
-- yt-dlp + ffmpeg en el dispositivo
+- yt-dlp + ffmpeg vía [youtubedl-android](https://github.com/yausername/youtubedl-android) (binarios nativos Android)
 
 ## Requisitos
 

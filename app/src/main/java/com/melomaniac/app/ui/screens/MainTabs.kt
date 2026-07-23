@@ -43,6 +43,7 @@ import com.melomaniac.app.ui.TrackList
 import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.ui.theme.Surface
 import com.melomaniac.app.ui.theme.TextSecondary
+import com.melomaniac.app.util.AppBusy
 import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -86,8 +87,8 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
     var query by remember { mutableStateOf("") }
     var message by remember { mutableStateOf<String?>(null) }
     var local by remember { mutableStateOf<List<TrackRow>>(emptyList()) }
-    var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val globalBusy by AppBusy.message.collectAsState()
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Buscar")
@@ -95,32 +96,36 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
         AppTextField(query, { query = it }, "URL o búsqueda…")
         PrimaryButton("Buscar / Encolar", onClick = {
             scope.launch {
-                busy = true
                 message = null
                 try {
                     val q = query.trim()
-                    if (q.contains("http") || q.startsWith("spotify:") || q.length > 3 && (q.contains("spotify") || q.contains("youtu"))) {
-                        val (n, msg) = container.downloadQueue.enqueueFromUserInput(q)
-                        message = msg
-                        local = emptyList()
-                    } else {
-                        local = container.library.search(q)
-                        // also try enqueue as remote search download option via message
-                        message = if (local.isEmpty()) "Sin resultados locales. Podés encolar la búsqueda para YouTube." else null
+                    AppBusy.run("Buscando…") {
+                        if (q.contains("http") || q.startsWith("spotify:") || q.length > 3 && (q.contains("spotify") || q.contains("youtu"))) {
+                            val (_, msg) = container.downloadQueue.enqueueFromUserInput(q)
+                            message = msg
+                            local = emptyList()
+                        } else {
+                            local = container.library.search(q)
+                            message = if (local.isEmpty()) {
+                                "Sin resultados locales. Podés encolar la búsqueda para YouTube."
+                            } else {
+                                null
+                            }
+                        }
                     }
                 } catch (e: Exception) {
                     AppLog.e("Search", "Buscar / Encolar failed", e)
                     message = e.message
-                } finally {
-                    busy = false
                 }
             }
-        }, enabled = !busy)
+        }, enabled = globalBusy == null)
         if (!local.isEmpty() || query.isNotBlank()) {
             GhostButton("Encolar búsqueda en YouTube", onClick = {
                 scope.launch {
                     try {
-                        val (_, msg) = container.downloadQueue.enqueueFromUserInput(query)
+                        val (_, msg) = AppBusy.run("Encolando…") {
+                            container.downloadQueue.enqueueFromUserInput(query)
+                        }
                         message = msg
                     } catch (e: Exception) {
                         AppLog.e("Search", "Encolar YouTube failed", e)
@@ -139,16 +144,41 @@ fun DownloadsScreen(container: AppContainer) {
     val jobs by container.downloadDao.observeAll().collectAsState(initial = emptyList())
     val status by container.downloadQueue.status.collectAsState()
     val scope = rememberCoroutineScope()
+    val globalBusy by AppBusy.message.collectAsState()
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Descargas")
         Muted(status)
-        PrimaryButton("Reanudar cola", onClick = { container.downloadQueue.start() })
-        GhostButton("Pausar cola", onClick = { container.downloadQueue.stop() })
-        GhostButton("Limpiar terminadas", onClick = { scope.launch { container.downloadQueue.clearFinished() } })
+        PrimaryButton("Reanudar cola", onClick = {
+            scope.launch {
+                AppBusy.run("Reanudando cola…") {
+                    container.downloadQueue.start()
+                }
+            }
+        }, enabled = globalBusy == null)
+        GhostButton("Pausar cola", onClick = {
+            scope.launch {
+                AppBusy.run("Pausando cola…") {
+                    container.downloadQueue.stop()
+                }
+            }
+        })
+        GhostButton("Limpiar terminadas", onClick = {
+            scope.launch {
+                AppBusy.run("Limpiando…") {
+                    container.downloadQueue.clearFinished()
+                }
+            }
+        })
         LazyColumn {
             items(jobs, key = { it.id }) { job ->
-                DownloadJobCard(job, onRetry = { scope.launch { container.downloadQueue.retry(job.id) } })
+                DownloadJobCard(job, onRetry = {
+                    scope.launch {
+                        AppBusy.run("Reintentando…") {
+                            container.downloadQueue.retry(job.id)
+                        }
+                    }
+                })
             }
         }
     }
@@ -186,11 +216,11 @@ private fun MaterialThemeError() = androidx.compose.material3.MaterialTheme.colo
 fun SettingsScreen(container: AppContainer) {
     var settings by remember { mutableStateOf(AppSettings()) }
     var status by remember { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
     var pendingUpdate by remember { mutableStateOf<ReleaseUpdate?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val updater = container.appUpdater
+    val globalBusy by AppBusy.message.collectAsState()
 
     LaunchedEffect(Unit) {
         settings = container.settings.get()
@@ -203,20 +233,19 @@ fun SettingsScreen(container: AppContainer) {
 
     fun installPending(update: ReleaseUpdate) {
         scope.launch {
-            busy = true
             try {
-                if (!updater.canInstallPackages()) {
-                    status = "Permití instalar apps de MeloManiac y volvé a tocar Instalar"
-                    context.startActivity(updater.intentToAllowInstalls())
-                    return@launch
+                AppBusy.run("Instalando actualización…") {
+                    if (!updater.canInstallPackages()) {
+                        status = "Permití instalar apps de MeloManiac y volvé a tocar Instalar"
+                        context.startActivity(updater.intentToAllowInstalls())
+                        return@run
+                    }
+                    val apk = updater.downloadApk(update) { status = it }
+                    updater.installApk(apk)
+                    status = "Seguí el instalador de Android"
                 }
-                val apk = updater.downloadApk(update) { status = it }
-                updater.installApk(apk)
-                status = "Seguí el instalador de Android"
             } catch (e: Exception) {
                 status = e.message
-            } finally {
-                busy = false
             }
         }
     }
@@ -243,25 +272,29 @@ fun SettingsScreen(container: AppContainer) {
                     return@PrimaryButton
                 }
                 scope.launch {
-                    busy = true
                     pendingUpdate = null
-                    status = "Consultando GitHub…"
-                    when (val result = updater.checkForUpdate()) {
-                        is UpdateCheckResult.UpToDate -> {
-                            status = "Ya tenés la última versión (${BuildConfig.VERSION_NAME})"
+                    try {
+                        AppBusy.run("Buscando actualizaciones…") {
+                            status = "Consultando GitHub…"
+                            when (val result = updater.checkForUpdate()) {
+                                is UpdateCheckResult.UpToDate -> {
+                                    status = "Ya tenés la última versión (${BuildConfig.VERSION_NAME})"
+                                }
+                                is UpdateCheckResult.Available -> {
+                                    pendingUpdate = result.update
+                                    status = "Nueva versión ${result.update.versionName} disponible"
+                                }
+                                is UpdateCheckResult.Failed -> {
+                                    status = result.message
+                                }
+                            }
                         }
-                        is UpdateCheckResult.Available -> {
-                            pendingUpdate = result.update
-                            status = "Nueva versión ${result.update.versionName} disponible"
-                        }
-                        is UpdateCheckResult.Failed -> {
-                            status = result.message
-                        }
+                    } catch (e: Exception) {
+                        status = e.message
                     }
-                    busy = false
                 }
             },
-            enabled = !busy,
+            enabled = globalBusy == null,
         )
         if (pendingUpdate != null) {
             GhostButton("Cancelar actualización") {
@@ -304,43 +337,40 @@ fun SettingsScreen(container: AppContainer) {
         AppTextField(settings.spotifyClientId, { save(settings.copy(spotifyClientId = it)) }, "Client ID")
         AppTextField(settings.spotifyClientSecret, { save(settings.copy(spotifyClientSecret = it)) }, "Client Secret")
         Text(
-            "Binarios yt-dlp (se instalan en code-cache, ejecutable en Android 10+)",
+            "yt-dlp / ffmpeg (embebidos para Android 10+; no usan filesDir)",
             color = TextSecondary,
             modifier = Modifier.padding(top = 16.dp),
         )
-        PrimaryButton("Descargar / verificar binarios", onClick = {
+        PrimaryButton("Inicializar / verificar binarios", onClick = {
             scope.launch {
-                busy = true
                 try {
-                    container.binaryManager.ensureBinaries { status = it }
+                    AppBusy.run("Preparando binarios…") {
+                        container.binaryManager.ensureBinaries { status = it }
+                    }
                 } catch (e: Exception) {
                     status = e.message
-                } finally {
-                    busy = false
                 }
             }
-        }, enabled = !busy)
+        }, enabled = globalBusy == null)
         GhostButton("Reinstalar binarios", onClick = {
             scope.launch {
-                busy = true
                 try {
-                    container.binaryManager.reinstallAll { status = it }
+                    AppBusy.run("Reinstalando binarios…") {
+                        container.binaryManager.reinstallAll { status = it }
+                    }
                 } catch (e: Exception) {
                     status = e.message
-                } finally {
-                    busy = false
                 }
             }
         })
         GhostButton("Actualizar yt-dlp", onClick = {
             scope.launch {
-                busy = true
                 try {
-                    container.binaryManager.updateYtDlp { status = it }
+                    AppBusy.run("Actualizando yt-dlp…") {
+                        container.binaryManager.updateYtDlp { status = it }
+                    }
                 } catch (e: Exception) {
                     status = e.message
-                } finally {
-                    busy = false
                 }
             }
         })
