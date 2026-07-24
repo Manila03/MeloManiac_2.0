@@ -8,6 +8,9 @@ import com.melomaniac.app.download.SpotifyScraper
 import com.melomaniac.app.download.YtDlpRunner
 import com.melomaniac.app.player.PlayerController
 import com.melomaniac.app.update.AppUpdater
+import com.melomaniac.app.util.AppLog
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 class AppContainer(context: Context) {
@@ -21,6 +24,7 @@ class AppContainer(context: Context) {
     val binaryManager = BinaryManager(appContext)
     val appUpdater = AppUpdater(appContext)
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
+    private val coversDir = File(appContext.filesDir, "covers").also { if (!it.exists()) it.mkdirs() }
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
     val spotify = SpotifyScraper(appContext)
     val covers = CoverStore(appContext)
@@ -39,5 +43,41 @@ class AppContainer(context: Context) {
 
     init {
         downloadQueue.start()
+    }
+
+    /**
+     * Wipes Room tables and deletes audio/cover files under filesDir.
+     * Stops the download queue and clears the player first.
+     */
+    suspend fun resetLibrary() = withContext(Dispatchers.IO) {
+        AppLog.i(TAG, "resetLibrary: stopping queue + player")
+        downloadQueue.stop()
+        withContext(Dispatchers.Main) { player.stopAndClear() }
+
+        AppLog.i(TAG, "resetLibrary: clearAllTables")
+        db.clearAllTables()
+
+        wipeDir(musicDir)
+        wipeDir(coversDir)
+        musicDir.mkdirs()
+        coversDir.mkdirs()
+        AppLog.i(TAG, "resetLibrary: done")
+    }
+
+    private fun wipeDir(dir: File) {
+        if (!dir.exists()) return
+        dir.listFiles()?.forEach { child ->
+            runCatching {
+                if (!child.deleteRecursively()) {
+                    AppLog.w(TAG, "could not delete ${child.absolutePath}")
+                }
+            }.onFailure {
+                AppLog.w(TAG, "wipe failed ${child.absolutePath}: ${it.message}")
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "AppContainer"
     }
 }

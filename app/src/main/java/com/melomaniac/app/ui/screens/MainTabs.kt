@@ -189,6 +189,7 @@ fun SettingsScreen(container: AppContainer) {
     var settings by remember { mutableStateOf(AppSettings()) }
     var status by remember { mutableStateOf<String?>(null) }
     var pendingUpdate by remember { mutableStateOf<ReleaseUpdate?>(null) }
+    var confirmReset by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val updater = container.appUpdater
@@ -220,6 +221,42 @@ fun SettingsScreen(container: AppContainer) {
                 status = e.message
             }
         }
+    }
+
+    if (confirmReset) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Resetear biblioteca") },
+            text = {
+                Text(
+                    "Se van a borrar todos los temas, playlists, historial de descargas, " +
+                        "ajustes guardados y los archivos de audio/portadas en el dispositivo. " +
+                        "Esta acción no se puede deshacer.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmReset = false
+                        scope.launch {
+                            try {
+                                AppBusy.run("Reseteando biblioteca…") {
+                                    container.resetLibrary()
+                                }
+                                settings = container.settings.get()
+                                status = "Biblioteca reseteada"
+                            } catch (e: Exception) {
+                                status = e.message ?: "Error al resetear"
+                            }
+                        }
+                    },
+                    enabled = globalBusy == null,
+                ) { Text("Resetear todo", color = MaterialThemeError()) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) { Text("Cancelar") }
+            },
+        )
     }
 
     Column(
@@ -349,6 +386,13 @@ fun SettingsScreen(container: AppContainer) {
                 }
             }
         })
+
+        Text("Datos", color = TextSecondary, modifier = Modifier.padding(top = 24.dp))
+        Muted("Vacía la base de datos Room y borra audio/portadas en filesDir.")
+        GhostButton("Resetear biblioteca") {
+            if (globalBusy == null) confirmReset = true
+        }
+
         status?.let { Text(it, color = Accent, modifier = Modifier.padding(top = 8.dp, bottom = 24.dp)) }
     }
 }

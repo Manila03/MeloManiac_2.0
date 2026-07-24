@@ -83,6 +83,14 @@ class PlayerController(
         if (c.isPlaying) c.pause() else c.play()
     }
 
+    /** Stops playback and clears the queue (e.g. before wiping the library). */
+    fun stopAndClear() {
+        val c = controller ?: return
+        c.stop()
+        c.clearMediaItems()
+        _state.value = PlayerUiState(connected = _state.value.connected)
+    }
+
     fun skipNext() = controller?.seekToNextMediaItem()
     fun skipPrev() {
         val c = controller ?: return
