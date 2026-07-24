@@ -95,6 +95,20 @@ class LibraryRepository(private val dao: LibraryDao) {
 
     suspend fun toggleFavorite(id: String) = dao.toggleFavorite(id)
 
+    /** Deletes DB rows and the audio file on disk. */
+    suspend fun deleteTrack(id: String) {
+        val track = dao.getTrack(id) ?: return
+        dao.deletePlaylistLinks(id)
+        dao.deleteGenreLinks(id)
+        dao.deleteFolderLinks(id)
+        dao.deletePlayHistory(id)
+        dao.deleteTrackRow(id)
+        runCatching {
+            val file = java.io.File(track.path)
+            if (file.exists()) file.delete()
+        }
+    }
+
     suspend fun recordPlay(trackId: String) {
         val now = System.currentTimeMillis()
         dao.setLastPlayed(trackId, now)

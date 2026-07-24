@@ -4,6 +4,7 @@ import android.content.Context
 import com.melomaniac.app.download.BinaryManager
 import com.melomaniac.app.download.DownloadQueue
 import com.melomaniac.app.download.SpotifyApi
+import com.melomaniac.app.download.SpotifyAuth
 import com.melomaniac.app.download.YtDlpRunner
 import com.melomaniac.app.player.PlayerController
 import com.melomaniac.app.update.AppUpdater
@@ -21,7 +22,8 @@ class AppContainer(context: Context) {
     val appUpdater = AppUpdater(appContext)
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
-    val spotify = SpotifyApi()
+    val spotifyAuth = SpotifyAuth(appContext)
+    val spotify = SpotifyApi(spotifyAuth)
 
     val downloadQueue = DownloadQueue(
         downloadDao = downloadDao,

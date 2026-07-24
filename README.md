@@ -68,12 +68,26 @@ GitHub Actions construye el APK y lo adjunta al Release como `MeloManiac.apk`.
 
 **Importante:** si regenerás el keystore, no se podrá actualizar encima de instalaciones anteriores.
 
+## Spotify
+
+Flujo (Web API 2026):
+
+1. Creá una app en [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
+2. Redirect URI exacto: `melomaniac://spotify-callback`
+3. En la app: Ajustes → Client ID/Secret → **Conectar Spotify** (login OAuth).
+4. Pegá un álbum/playlist/tema en Buscar. La playlist tiene que ser tuya o colaborativa (la cuenta conectada).
+5. MeloManiac resuelve metadatos vía Spotify y descarga el audio desde YouTube con yt-dlp.
+
+Álbumes/temas de catálogo pueden usar Client Credentials; **playlists requieren la cuenta conectada**.
+
+Ver [migración Feb 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
+
 ## Uso
 
-1. Ajustes → Spotify credentials
-2. Ajustes → Descargar binarios (yt-dlp/ffmpeg)
+1. Ajustes → Spotify credentials + Conectar Spotify
+2. Ajustes → Inicializar binarios (yt-dlp/ffmpeg)
 3. Buscar → pegá URL YouTube/Spotify o texto
-4. Reproducí desde Biblioteca
+4. Reproducí desde Biblioteca (borrar tema con el ícono de basura)
 
 ## Notas
 

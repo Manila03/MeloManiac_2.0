@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Pause
@@ -35,6 +36,10 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -92,11 +97,37 @@ fun TrackList(
     tracks: List<TrackRow>,
     onPlay: (List<TrackRow>, Int) -> Unit,
     onToggleFavorite: (String) -> Unit,
+    onDelete: ((String) -> Unit)? = null,
 ) {
     if (tracks.isEmpty()) {
         Text("Sin temas", color = TextMuted, modifier = Modifier.padding(24.dp))
         return
     }
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    val pendingTitle = tracks.firstOrNull { it.id == pendingDeleteId }?.title
+
+    if (pendingDeleteId != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingDeleteId = null },
+            title = { Text("Borrar canción") },
+            text = {
+                Text(
+                    "¿Borrar \"${pendingTitle ?: "este tema"}\" del dispositivo y de la biblioteca?",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = pendingDeleteId
+                    pendingDeleteId = null
+                    if (id != null) onDelete?.invoke(id)
+                }) { Text("Borrar", color = Accent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) { Text("Cancelar") }
+            },
+        )
+    }
+
     LazyColumn(contentPadding = PaddingValues(bottom = 100.dp)) {
         itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
             Card(
@@ -126,6 +157,15 @@ fun TrackList(
                             contentDescription = null,
                             tint = if (track.isFavorite) Accent else TextMuted,
                         )
+                    }
+                    if (onDelete != null) {
+                        IconButton(onClick = { pendingDeleteId = track.id }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Borrar",
+                                tint = TextMuted,
+                            )
+                        }
                     }
                 }
             }

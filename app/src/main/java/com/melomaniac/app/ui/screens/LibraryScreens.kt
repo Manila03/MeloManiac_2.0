@@ -22,7 +22,28 @@ import com.melomaniac.app.ui.PrimaryButton
 import com.melomaniac.app.ui.ScreenTitle
 import com.melomaniac.app.ui.SimpleListItem
 import com.melomaniac.app.ui.TrackList
+import com.melomaniac.app.util.AppBusy
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+
+@Composable
+private fun LibraryTrackList(
+    container: AppContainer,
+    tracks: List<TrackRow>,
+    onPlay: (List<TrackRow>, Int) -> Unit,
+    scope: CoroutineScope,
+) {
+    TrackList(
+        tracks = tracks,
+        onPlay = onPlay,
+        onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
+        onDelete = { id ->
+            scope.launch {
+                AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
+            }
+        },
+    )
+}
 
 @Composable
 fun ArtistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
@@ -117,7 +138,7 @@ fun FavoritesScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Un
     val scope = rememberCoroutineScope()
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Favoritos")
-        TrackList(tracks, onPlay) { id -> scope.launch { container.library.toggleFavorite(id) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -127,7 +148,7 @@ fun RecentScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
     val scope = rememberCoroutineScope()
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Recientes")
-        TrackList(tracks, onPlay) { id -> scope.launch { container.library.toggleFavorite(id) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -141,7 +162,7 @@ fun ArtistDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackR
     }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        TrackList(tracks, onPlay) { tid -> scope.launch { container.library.toggleFavorite(tid) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -155,7 +176,7 @@ fun AlbumDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRo
     }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        TrackList(tracks, onPlay) { tid -> scope.launch { container.library.toggleFavorite(tid) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -169,7 +190,7 @@ fun PlaylistDetailScreen(container: AppContainer, id: String, onPlay: (List<Trac
     }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        TrackList(tracks, onPlay) { tid -> scope.launch { container.library.toggleFavorite(tid) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -183,7 +204,7 @@ fun GenreDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRo
     }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        TrackList(tracks, onPlay) { tid -> scope.launch { container.library.toggleFavorite(tid) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 
@@ -197,6 +218,6 @@ fun FolderDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackR
     }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        TrackList(tracks, onPlay) { tid -> scope.launch { container.library.toggleFavorite(tid) } }
+        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }

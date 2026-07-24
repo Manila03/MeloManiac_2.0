@@ -76,6 +76,11 @@ fun LibraryHomeScreen(
                 tracks = tracks,
                 onPlay = onPlay,
                 onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
+                onDelete = { id ->
+                    scope.launch {
+                        AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
+                    }
+                },
             )
         }
     }
@@ -170,7 +175,16 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
             })
         }
         message?.let { Text(it, color = Accent, modifier = Modifier.padding(vertical = 8.dp)) }
-        TrackList(local, onPlay) { id -> scope.launch { container.library.toggleFavorite(id) } }
+        TrackList(
+            tracks = local,
+            onPlay = onPlay,
+            onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
+            onDelete = { id ->
+                scope.launch {
+                    AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
+                }
+            },
+        )
     }
 }
 
@@ -257,8 +271,11 @@ fun SettingsScreen(container: AppContainer) {
     val updater = container.appUpdater
     val globalBusy by AppBusy.message.collectAsState()
 
+    val spotifyConnected = remember { mutableStateOf(container.spotifyAuth.isConnected()) }
+
     LaunchedEffect(Unit) {
         settings = container.settings.get()
+        spotifyConnected.value = container.spotifyAuth.isConnected()
     }
 
     fun save(patch: AppSettings) {
@@ -369,9 +386,35 @@ fun SettingsScreen(container: AppContainer) {
             modifier = Modifier.padding(top = 8.dp),
         )
         Text("Spotify API", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
-        Muted("Obligatorio para álbumes/playlists/temas de Spotify (Client Credentials).")
+        Muted(
+            "Client ID/Secret + Conectar Spotify (OAuth). Playlists requieren login de la cuenta dueña " +
+                "(cambios Web API 2026). Redirect URI en el Dashboard: melomaniac://spotify-callback",
+        )
         AppTextField(settings.spotifyClientId, { save(settings.copy(spotifyClientId = it)) }, "Client ID")
         AppTextField(settings.spotifyClientSecret, { save(settings.copy(spotifyClientSecret = it)) }, "Client Secret")
+        Text(
+            if (spotifyConnected.value) "Cuenta Spotify: conectada" else "Cuenta Spotify: no conectada",
+            color = if (spotifyConnected.value) Accent else TextSecondary,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        PrimaryButton(
+            if (spotifyConnected.value) "Reconectar Spotify" else "Conectar Spotify",
+            onClick = {
+                try {
+                    context.startActivity(container.spotifyAuth.beginLogin(settings.spotifyClientId))
+                } catch (e: Exception) {
+                    status = e.message
+                }
+            },
+            enabled = globalBusy == null && settings.spotifyClientId.isNotBlank(),
+        )
+        if (spotifyConnected.value) {
+            GhostButton("Desconectar Spotify") {
+                container.spotifyAuth.disconnect()
+                spotifyConnected.value = false
+                status = "Spotify desconectado"
+            }
+        }
         Text(
             "yt-dlp / ffmpeg (embebidos para Android 10+; no usan filesDir)",
             color = TextSecondary,

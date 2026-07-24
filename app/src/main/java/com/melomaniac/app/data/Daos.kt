@@ -192,6 +192,24 @@ interface LibraryDao {
     @Query("SELECT COUNT(*) FROM tracks")
     fun observeTrackCount(): Flow<Int>
 
+    @Query("SELECT * FROM tracks WHERE id = :id")
+    suspend fun getTrack(id: String): TrackEntity?
+
+    @Query("DELETE FROM playlist_tracks WHERE trackId = :trackId")
+    suspend fun deletePlaylistLinks(trackId: String)
+
+    @Query("DELETE FROM genre_tracks WHERE trackId = :trackId")
+    suspend fun deleteGenreLinks(trackId: String)
+
+    @Query("DELETE FROM folder_tracks WHERE trackId = :trackId")
+    suspend fun deleteFolderLinks(trackId: String)
+
+    @Query("DELETE FROM play_history WHERE trackId = :trackId")
+    suspend fun deletePlayHistory(trackId: String)
+
+    @Query("DELETE FROM tracks WHERE id = :id")
+    suspend fun deleteTrackRow(id: String)
+
     @Query("UPDATE tracks SET isFavorite = NOT isFavorite WHERE id = :id")
     suspend fun toggleFavorite(id: String)
 

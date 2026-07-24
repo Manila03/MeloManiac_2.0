@@ -1,12 +1,13 @@
 package com.melomaniac.app.download
 
+import com.melomaniac.app.util.AppLog
 import okhttp3.Credentials
 import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-import com.melomaniac.app.util.AppLog
 
 data class SpotifyTrackMeta(
     val id: String,
@@ -32,29 +33,28 @@ sealed class SpotifyResolve {
     data class Collection(val collection: SpotifyCollection) : SpotifyResolve()
 }
 
-class SpotifyApi {
+class SpotifyApi(
+    private val auth: SpotifyAuth? = null,
+) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    @Volatile private var token: String? = null
-    @Volatile private var expiresAt: Long = 0
+    @Volatile private var appToken: String? = null
+    @Volatile private var appTokenExpiresAt: Long = 0
 
     fun parseUrl(input: String): Pair<String, String>? {
         val trimmed = input.trim()
-        // URI scheme
         Regex("^spotify:(track|album|playlist):([a-zA-Z0-9]+)").find(trimmed)?.let {
             return it.groupValues[1] to it.groupValues[2]
         }
-        // https://open.spotify.com[/intl-xx]/track|album|playlist/ID
         Regex(
             """(?:https?://)?(?:open\.)?spotify\.com/(?:intl-[a-zA-Z]{2}/)?(track|album|playlist)/([a-zA-Z0-9]+)""",
             RegexOption.IGNORE_CASE,
         ).find(trimmed)?.let {
             return it.groupValues[1].lowercase() to it.groupValues[2]
         }
-        // Paste may wrap the URL in other text
         Regex(
             """spotify\.com/(?:intl-[a-zA-Z]{2}/)?(track|album|playlist)/([a-zA-Z0-9]+)""",
             RegexOption.IGNORE_CASE,
@@ -67,7 +67,26 @@ class SpotifyApi {
     fun resolve(input: String, clientId: String, clientSecret: String): SpotifyResolve {
         val parsed = parseUrl(input) ?: error("URL de Spotify inválida")
         AppLog.i("Spotify", "resolve ${parsed.first}/${parsed.second}")
-        val access = accessToken(clientId, clientSecret)
+
+        val access = when (parsed.first) {
+            "playlist" -> {
+                val user = auth?.userAccessToken(clientId, clientSecret)
+                if (user.isNullOrBlank()) {
+                    error(
+                        "Para playlists de Spotify conectá tu cuenta en Ajustes → Conectar Spotify. " +
+                            "Desde 2026 Client Credentials ya no puede leer el contenido de playlists. " +
+                            "También registrá el Redirect URI: ${SpotifyAuth.REDIRECT_URI}",
+                    )
+                }
+                user
+            }
+            else -> {
+                // Albums/tracks: prefer user token, else app credentials.
+                auth?.userAccessToken(clientId, clientSecret)
+                    ?: clientCredentialsToken(clientId, clientSecret)
+            }
+        }
+
         return when (parsed.first) {
             "track" -> SpotifyResolve.Track(fetchTrack(parsed.second, access)).also {
                 AppLog.i("Spotify", "track: ${it.track.name}")
@@ -84,11 +103,11 @@ class SpotifyApi {
     fun searchQuery(track: SpotifyTrackMeta): String =
         "${track.name} ${track.artists.joinToString(" ")}".trim()
 
-    private fun accessToken(clientId: String, clientSecret: String): String {
+    private fun clientCredentialsToken(clientId: String, clientSecret: String): String {
         if (clientId.isBlank() || clientSecret.isBlank()) {
             error("Configurá Spotify Client ID y Secret en Ajustes")
         }
-        if (token != null && expiresAt > System.currentTimeMillis() + 30_000) return token!!
+        if (appToken != null && appTokenExpiresAt > System.currentTimeMillis() + 30_000) return appToken!!
         val body = FormBody.Builder().add("grant_type", "client_credentials").build()
         val req = Request.Builder()
             .url("https://accounts.spotify.com/api/token")
@@ -96,11 +115,14 @@ class SpotifyApi {
             .post(body)
             .build()
         client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Spotify auth failed (${resp.code})")
-            val json = JSONObject(resp.body!!.string())
-            token = json.getString("access_token")
-            expiresAt = System.currentTimeMillis() + json.getLong("expires_in") * 1000
-            return token!!
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                error(spotifyHttpError("auth", resp.code, raw))
+            }
+            val json = JSONObject(raw)
+            appToken = json.getString("access_token")
+            appTokenExpiresAt = System.currentTimeMillis() + json.getLong("expires_in") * 1000
+            return appToken!!
         }
     }
 
@@ -111,12 +133,30 @@ class SpotifyApi {
             .get()
             .build()
         client.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) error("Spotify API ${resp.code}")
-            return JSONObject(resp.body!!.string())
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) {
+                error(spotifyHttpError(path, resp.code, raw))
+            }
+            return JSONObject(raw)
         }
     }
 
-    private fun mapTrack(obj: JSONObject, albumFallback: String? = null, images: org.json.JSONArray? = null): SpotifyTrackMeta {
+    private fun spotifyHttpError(where: String, code: Int, body: String): String {
+        val msg = runCatching {
+            JSONObject(body).optJSONObject("error")?.optString("message")
+        }.getOrNull()?.takeIf { !it.isNullOrBlank() }
+        AppLog.e("Spotify", "$where → $code ${body.take(400)}")
+        return when (code) {
+            401 -> "Spotify no autorizó (401). Revisá Client ID/Secret o reconectá la cuenta."
+            403 -> "Spotify 403: sin permiso. Para playlists: Conectar Spotify en Ajustes " +
+                "(cuenta dueña/colaboradora), Premium en modo desarrollo, y Redirect URI " +
+                "${SpotifyAuth.REDIRECT_URI}. Detalle: ${msg ?: "Forbidden"}"
+            404 -> "Spotify no encontró el recurso (404). ${msg.orEmpty()}"
+            else -> "Spotify API $code${if (msg != null) ": $msg" else ""}"
+        }
+    }
+
+    private fun mapTrack(obj: JSONObject, albumFallback: String? = null, images: JSONArray? = null): SpotifyTrackMeta {
         val artists = obj.optJSONArray("artists")
         val names = mutableListOf<String>()
         if (artists != null) {
@@ -136,18 +176,27 @@ class SpotifyApi {
         )
     }
 
+    private fun mapTrackFromItem(item: JSONObject): SpotifyTrackMeta? {
+        val track = item.optJSONObject("track")
+            ?: item.optJSONObject("item")
+            ?: return null
+        if (!track.has("id") || track.isNull("id")) return null
+        // Episodes / locals may lack artists
+        if (track.optBoolean("is_local", false)) return null
+        return mapTrack(track)
+    }
+
     private fun fetchTrack(id: String, access: String) = mapTrack(get("/tracks/$id", access))
 
     private fun fetchAlbum(id: String, access: String): SpotifyCollection {
         val album = get("/albums/$id", access)
         val tracks = mutableListOf<SpotifyTrackMeta>()
-        var next: String? = null
         val first = album.getJSONObject("tracks")
         val items = first.getJSONArray("items")
         for (i in 0 until items.length()) {
             tracks += mapTrack(items.getJSONObject(i), album.optString("name"), album.optJSONArray("images"))
         }
-        next = first.optString("next").ifBlank { null }
+        var next = first.optString("next").ifBlank { null }
         while (next != null) {
             val page = get(next, access)
             val pageItems = page.getJSONArray("items")
@@ -169,20 +218,50 @@ class SpotifyApi {
     private fun fetchPlaylist(id: String, access: String): SpotifyCollection {
         val playlist = get("/playlists/$id", access)
         val tracks = mutableListOf<SpotifyTrackMeta>()
-        fun push(items: org.json.JSONArray) {
-            for (i in 0 until items.length()) {
-                val track = items.getJSONObject(i).optJSONObject("track") ?: continue
-                if (track.has("id") && !track.isNull("id")) tracks += mapTrack(track)
+
+        fun pushPage(page: JSONObject) {
+            val arr = page.optJSONArray("items") ?: return
+            for (i in 0 until arr.length()) {
+                mapTrackFromItem(arr.getJSONObject(i))?.let { tracks += it }
             }
         }
-        val first = playlist.getJSONObject("tracks")
-        push(first.getJSONArray("items"))
-        var next = first.optString("next").ifBlank { null }
-        while (next != null) {
-            val page = get(next, access)
-            push(page.getJSONArray("items"))
-            next = page.optString("next").ifBlank { null }
+
+        // Spotify Feb 2026: /tracks → /items (keep /tracks as fallback).
+        val listed = runCatching {
+            var next: String? = "/playlists/$id/items?limit=50"
+            while (next != null) {
+                val page = get(next, access)
+                pushPage(page)
+                next = page.optString("next").ifBlank { null }
+            }
+            true
+        }.onFailure { AppLog.w("Spotify", "playlist /items failed, trying /tracks", it) }.getOrDefault(false)
+
+        if (!listed || tracks.isEmpty()) {
+            runCatching {
+                var next: String? = "/playlists/$id/tracks?limit=50"
+                while (next != null) {
+                    val page = get(next, access)
+                    pushPage(page)
+                    next = page.optString("next").ifBlank { null }
+                }
+            }.onFailure { AppLog.w("Spotify", "playlist /tracks failed", it) }
         }
+
+        // Owned playlist may embed items/tracks in the playlist payload.
+        if (tracks.isEmpty()) {
+            playlist.optJSONObject("items")?.let { pushPage(it) }
+            playlist.optJSONObject("tracks")?.let { pushPage(it) }
+        }
+
+        if (tracks.isEmpty()) {
+            error(
+                "Spotify devolvió la playlist sin temas. " +
+                    "Tiene que ser tuya o colaborativa (API 2026). " +
+                    "Conectá la cuenta dueña en Ajustes.",
+            )
+        }
+
         return SpotifyCollection(
             type = "playlist",
             id = playlist.getString("id"),
@@ -212,23 +291,16 @@ object LinkDetector {
     fun youtubePlaylistId(input: String): String? =
         Regex("[?&]list=([a-zA-Z0-9_-]+)").find(input)?.groupValues?.get(1)
 
-    /**
-     * True when the URL should enqueue the whole playlist, not just one video.
-     * Covers /playlist?list=… and watch?v=…&list=PL… (shared playlist links).
-     * Skips YouTube Mix/Radio lists (RD…).
-     */
     fun isYouTubePlaylistUrl(input: String): Boolean {
         val listId = youtubePlaylistId(input) ?: return false
         if (listId.startsWith("RD", ignoreCase = true)) return false
         if (input.contains("/playlist", ignoreCase = true)) return true
-        // Standard user/playlist IDs when shared as watch URL with list=
         return listId.startsWith("PL", ignoreCase = true) ||
             listId.startsWith("OL", ignoreCase = true) ||
             listId.startsWith("UU", ignoreCase = true) ||
             listId.startsWith("FL", ignoreCase = true)
     }
 
-    /** Prefer Spotify over YouTube when both could match pasted text. */
     fun classify(input: String): String? = when {
         isSpotify(input) -> "spotify"
         isYouTube(input) -> "youtube"
