@@ -43,6 +43,7 @@ import com.melomaniac.app.ui.screens.AlbumDetailScreen
 import com.melomaniac.app.ui.screens.AlbumsScreen
 import com.melomaniac.app.ui.screens.ArtistDetailScreen
 import com.melomaniac.app.ui.screens.ArtistsScreen
+import com.melomaniac.app.ui.screens.BrowseLibraryScreen
 import com.melomaniac.app.ui.screens.DownloadsScreen
 import com.melomaniac.app.ui.screens.FavoritesScreen
 import com.melomaniac.app.ui.screens.FolderDetailScreen
@@ -200,19 +201,22 @@ fun MeloApp(
                 composable("library") {
                     LibraryHomeScreen(
                         container,
-                        onOpen = { key ->
-                            when (key) {
-                                "artists" -> nav.navigate("artists")
-                                "albums" -> nav.navigate("albums")
-                                "playlists" -> nav.navigate("playlists")
-                                "favorites" -> nav.navigate("favorites")
-                                "recent" -> nav.navigate("recent")
-                                "genres" -> nav.navigate("genres")
-                                "folders" -> nav.navigate("folders")
-                            }
-                        },
+                        onBrowse = { nav.navigate("browse") },
                         onPlay = ::play,
                     )
+                }
+                composable("browse") {
+                    BrowseLibraryScreen { key ->
+                        when (key) {
+                            "artists" -> nav.navigate("artists")
+                            "albums" -> nav.navigate("albums")
+                            "playlists" -> nav.navigate("playlists")
+                            "favorites" -> nav.navigate("favorites")
+                            "recent" -> nav.navigate("recent")
+                            "genres" -> nav.navigate("genres")
+                            "folders" -> nav.navigate("folders")
+                        }
+                    }
                 }
                 composable("search") { SearchScreen(container, ::play) }
                 composable("downloads") { DownloadsScreen(container) }

@@ -54,6 +54,12 @@ class DownloadQueue(
 
         when {
             LinkDetector.isSpotify(trimmed) -> {
+                if (settings.spotifyClientId.isBlank() || settings.spotifyClientSecret.isBlank()) {
+                    error(
+                        "Spotify detectado (${SpotifyApi().parseUrl(trimmed)?.first ?: "link"}). " +
+                            "Configurá Client ID y Secret en Ajustes para importar álbumes/playlists.",
+                    )
+                }
                 when (val resolved = spotify.resolve(trimmed, settings.spotifyClientId, settings.spotifyClientSecret)) {
                     is SpotifyResolve.Track -> {
                         enqueueSpotifyTrack(resolved.track)
@@ -79,7 +85,7 @@ class DownloadQueue(
                                 )
                             }
                             start()
-                            return c.tracks.size to "Álbum \"${c.name}\": ${c.tracks.size} temas"
+                            return c.tracks.size to "Álbum Spotify \"${c.name}\": ${c.tracks.size} temas"
                         } else {
                             val playlist = library.createPlaylist(c.name, c.externalUrl)
                             c.tracks.forEach { t ->
@@ -97,7 +103,7 @@ class DownloadQueue(
                                 )
                             }
                             start()
-                            return c.tracks.size to "Playlist \"${c.name}\": ${c.tracks.size} temas"
+                            return c.tracks.size to "Playlist Spotify \"${c.name}\": ${c.tracks.size} temas"
                         }
                     }
                 }
@@ -105,11 +111,12 @@ class DownloadQueue(
 
             LinkDetector.isYouTube(trimmed) -> {
                 val listId = LinkDetector.youtubePlaylistId(trimmed)
-                if (listId != null && trimmed.contains("/playlist")) {
+                if (listId != null && LinkDetector.isYouTubePlaylistUrl(trimmed)) {
                     val url = "https://www.youtube.com/playlist?list=$listId"
+                    AppLog.i("Queue", "YouTube playlist list=$listId")
                     val hits = ytDlp.listPlaylist(url)
-                    val playlist = library.createPlaylist("YouTube Playlist $listId", url)
                     if (hits.isEmpty()) error("No se pudieron listar temas de la playlist")
+                    val playlist = library.createPlaylist("YouTube Playlist", url)
                     hits.forEach { h ->
                         enqueue(
                             h.url,
@@ -175,7 +182,11 @@ class DownloadQueue(
         start()
     }
 
-    suspend fun clearFinished() = downloadDao.clearFinished()
+    /** Clears done + failed history (and cancelled). Leaves queued/running alone. */
+    suspend fun clearHistory() = downloadDao.clearHistory()
+
+    @Deprecated("Use clearHistory", ReplaceWith("clearHistory()"))
+    suspend fun clearFinished() = clearHistory()
 
     private suspend fun pump() {
         mutex.withLock {

@@ -43,13 +43,24 @@ class SpotifyApi {
 
     fun parseUrl(input: String): Pair<String, String>? {
         val trimmed = input.trim()
+        // URI scheme
         Regex("^spotify:(track|album|playlist):([a-zA-Z0-9]+)").find(trimmed)?.let {
             return it.groupValues[1] to it.groupValues[2]
         }
-        Regex("open\\.spotify\\.com/(?:intl-[a-z]{2}/)?(track|album|playlist)/([a-zA-Z0-9]+)", RegexOption.IGNORE_CASE)
-            .find(trimmed)?.let {
-                return it.groupValues[1].lowercase() to it.groupValues[2]
-            }
+        // https://open.spotify.com[/intl-xx]/track|album|playlist/ID
+        Regex(
+            """(?:https?://)?(?:open\.)?spotify\.com/(?:intl-[a-zA-Z]{2}/)?(track|album|playlist)/([a-zA-Z0-9]+)""",
+            RegexOption.IGNORE_CASE,
+        ).find(trimmed)?.let {
+            return it.groupValues[1].lowercase() to it.groupValues[2]
+        }
+        // Paste may wrap the URL in other text
+        Regex(
+            """spotify\.com/(?:intl-[a-zA-Z]{2}/)?(track|album|playlist)/([a-zA-Z0-9]+)""",
+            RegexOption.IGNORE_CASE,
+        ).find(trimmed)?.let {
+            return it.groupValues[1].lowercase() to it.groupValues[2]
+        }
         return null
     }
 
@@ -184,20 +195,43 @@ class SpotifyApi {
 }
 
 object LinkDetector {
-    fun isYouTube(input: String) = Regex("(?:youtube\\.com|youtu\\.be)", RegexOption.IGNORE_CASE).containsMatchIn(input)
+    fun isYouTube(input: String) =
+        Regex("(?:youtube\\.com|youtu\\.be|music\\.youtube\\.com)", RegexOption.IGNORE_CASE)
+            .containsMatchIn(input)
+
     fun isSpotify(input: String) = SpotifyApi().parseUrl(input) != null
 
     fun youtubeVideoId(input: String): String? {
         Regex("[?&]v=([a-zA-Z0-9_-]{11})").find(input)?.groupValues?.get(1)?.let { return it }
         Regex("youtu\\.be/([a-zA-Z0-9_-]{11})").find(input)?.groupValues?.get(1)?.let { return it }
+        Regex("youtube\\.com/shorts/([a-zA-Z0-9_-]{11})", RegexOption.IGNORE_CASE)
+            .find(input)?.groupValues?.get(1)?.let { return it }
         return null
     }
 
-    fun youtubePlaylistId(input: String): String? {
-        if (youtubeVideoId(input) != null && !input.contains("playlist?list=")) {
-            // watch URL with list param: treat as video unless pure playlist URL
-            if (!input.contains("/playlist")) return null
-        }
-        return Regex("[?&]list=([a-zA-Z0-9_-]+)").find(input)?.groupValues?.get(1)
+    fun youtubePlaylistId(input: String): String? =
+        Regex("[?&]list=([a-zA-Z0-9_-]+)").find(input)?.groupValues?.get(1)
+
+    /**
+     * True when the URL should enqueue the whole playlist, not just one video.
+     * Covers /playlist?list=… and watch?v=…&list=PL… (shared playlist links).
+     * Skips YouTube Mix/Radio lists (RD…).
+     */
+    fun isYouTubePlaylistUrl(input: String): Boolean {
+        val listId = youtubePlaylistId(input) ?: return false
+        if (listId.startsWith("RD", ignoreCase = true)) return false
+        if (input.contains("/playlist", ignoreCase = true)) return true
+        // Standard user/playlist IDs when shared as watch URL with list=
+        return listId.startsWith("PL", ignoreCase = true) ||
+            listId.startsWith("OL", ignoreCase = true) ||
+            listId.startsWith("UU", ignoreCase = true) ||
+            listId.startsWith("FL", ignoreCase = true)
+    }
+
+    /** Prefer Spotify over YouTube when both could match pasted text. */
+    fun classify(input: String): String? = when {
+        isSpotify(input) -> "spotify"
+        isYouTube(input) -> "youtube"
+        else -> null
     }
 }

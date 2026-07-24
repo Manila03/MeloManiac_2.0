@@ -30,6 +30,8 @@ import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.AppSettings
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.TrackRow
+import com.melomaniac.app.download.LinkDetector
+import com.melomaniac.app.download.SpotifyApi
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.update.ReleaseUpdate
@@ -51,7 +53,7 @@ import org.json.JSONObject
 @Composable
 fun LibraryHomeScreen(
     container: AppContainer,
-    onOpen: (String) -> Unit,
+    onBrowse: () -> Unit,
     onPlay: (List<TrackRow>, Int) -> Unit,
 ) {
     val tracks by container.library.observeTracks().collectAsState(initial = emptyList())
@@ -61,6 +63,29 @@ fun LibraryHomeScreen(
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("MeloManiac")
         Muted("Tu música. Offline. FLAC.")
+        PrimaryButton("Explorar biblioteca", onClick = onBrowse)
+        Text(
+            "Todas las canciones ($count)",
+            color = TextSecondary,
+            modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+        )
+        if (tracks.isEmpty()) {
+            Muted("Todavía no hay temas. Usá Buscar para encolar YouTube o Spotify.")
+        } else {
+            TrackList(
+                tracks = tracks,
+                onPlay = onPlay,
+                onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
+            )
+        }
+    }
+}
+
+@Composable
+fun BrowseLibraryScreen(onOpen: (String) -> Unit) {
+    Column(Modifier.padding(16.dp).fillMaxSize()) {
+        ScreenTitle("Biblioteca")
+        Muted("Artistas, álbumes, playlists y más.")
         val links = listOf(
             "artists" to "Artistas",
             "albums" to "Álbumes",
@@ -73,12 +98,6 @@ fun LibraryHomeScreen(
         links.forEach { (route, label) ->
             SimpleListItem(title = label, onClick = { onOpen(route) })
         }
-        Text("Temas ($count)", color = TextSecondary, modifier = Modifier.padding(top = 12.dp, bottom = 8.dp))
-        TrackList(
-            tracks = tracks.take(40),
-            onPlay = onPlay,
-            onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
-        )
     }
 }
 
@@ -89,27 +108,43 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
     var local by remember { mutableStateOf<List<TrackRow>>(emptyList()) }
     val scope = rememberCoroutineScope()
     val globalBusy by AppBusy.message.collectAsState()
+    val detected = remember(query) { LinkDetector.classify(query.trim()) }
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Buscar")
-        Muted("Pegá un link de YouTube/Spotify o buscá por texto.")
+        Muted("Pegá un link de YouTube/Spotify (tema, álbum o playlist) o buscá por texto.")
         AppTextField(query, { query = it }, "URL o búsqueda…")
+        when (detected) {
+            "spotify" -> {
+                val kind = SpotifyApi().parseUrl(query.trim())?.first ?: "link"
+                Text("Detectado: Spotify ($kind)", color = Accent, modifier = Modifier.padding(top = 4.dp))
+            }
+            "youtube" -> {
+                val kind = if (LinkDetector.isYouTubePlaylistUrl(query.trim())) "playlist" else "video"
+                Text("Detectado: YouTube ($kind)", color = Accent, modifier = Modifier.padding(top = 4.dp))
+            }
+        }
         PrimaryButton("Buscar / Encolar", onClick = {
             scope.launch {
                 message = null
                 try {
                     val q = query.trim()
                     AppBusy.run("Buscando…") {
-                        if (q.contains("http") || q.startsWith("spotify:") || q.length > 3 && (q.contains("spotify") || q.contains("youtu"))) {
-                            val (_, msg) = container.downloadQueue.enqueueFromUserInput(q)
-                            message = msg
-                            local = emptyList()
-                        } else {
-                            local = container.library.search(q)
-                            message = if (local.isEmpty()) {
-                                "Sin resultados locales. Podés encolar la búsqueda para YouTube."
-                            } else {
-                                null
+                        when {
+                            detected != null ||
+                                q.startsWith("spotify:") ||
+                                q.contains("http", ignoreCase = true) -> {
+                                val (_, msg) = container.downloadQueue.enqueueFromUserInput(q)
+                                message = msg
+                                local = emptyList()
+                            }
+                            else -> {
+                                local = container.library.search(q)
+                                message = if (local.isEmpty()) {
+                                    "Sin resultados locales. Podés encolar la búsqueda para YouTube."
+                                } else {
+                                    null
+                                }
                             }
                         }
                     }
@@ -119,7 +154,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                 }
             }
         }, enabled = globalBusy == null)
-        if (!local.isEmpty() || query.isNotBlank()) {
+        if (local.isNotEmpty() || (query.isNotBlank() && detected == null)) {
             GhostButton("Encolar búsqueda en YouTube", onClick = {
                 scope.launch {
                     try {
@@ -163,10 +198,10 @@ fun DownloadsScreen(container: AppContainer) {
                 }
             }
         })
-        GhostButton("Limpiar terminadas", onClick = {
+        GhostButton("Limpiar historial", onClick = {
             scope.launch {
-                AppBusy.run("Limpiando…") {
-                    container.downloadQueue.clearFinished()
+                AppBusy.run("Limpiando historial…") {
+                    container.downloadQueue.clearHistory()
                 }
             }
         })
@@ -334,6 +369,7 @@ fun SettingsScreen(container: AppContainer) {
             modifier = Modifier.padding(top = 8.dp),
         )
         Text("Spotify API", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
+        Muted("Obligatorio para álbumes/playlists/temas de Spotify (Client Credentials).")
         AppTextField(settings.spotifyClientId, { save(settings.copy(spotifyClientId = it)) }, "Client ID")
         AppTextField(settings.spotifyClientSecret, { save(settings.copy(spotifyClientSecret = it)) }, "Client Secret")
         Text(
