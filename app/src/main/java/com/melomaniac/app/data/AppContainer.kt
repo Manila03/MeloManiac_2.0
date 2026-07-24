@@ -24,6 +24,7 @@ class AppContainer(context: Context) {
     val spotify = SpotifyScraper(appContext)
 
     val downloadQueue = DownloadQueue(
+        appContext = appContext,
         downloadDao = downloadDao,
         library = library,
         settingsRepo = settings,

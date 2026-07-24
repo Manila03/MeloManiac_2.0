@@ -258,6 +258,9 @@ interface DownloadDao {
     @Query("UPDATE download_jobs SET status = 'queued', progress = 0, error = NULL, updatedAt = :updatedAt WHERE status = 'running'")
     suspend fun resetStuck(updatedAt: Long)
 
+    @Query("SELECT COUNT(*) FROM download_jobs WHERE status IN ('queued','running')")
+    suspend fun countActive(): Int
+
     @Query("DELETE FROM download_jobs WHERE status IN ('done','cancelled')")
     suspend fun clearFinished()
 

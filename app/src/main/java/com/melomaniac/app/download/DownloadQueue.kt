@@ -1,5 +1,6 @@
 package com.melomaniac.app.download
 
+import android.content.Context
 import com.melomaniac.app.data.DownloadDao
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.LibraryRepository
@@ -18,6 +19,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 class DownloadQueue(
+    private val appContext: Context,
     private val downloadDao: DownloadDao,
     private val library: LibraryRepository,
     private val settingsRepo: SettingsRepository,
@@ -45,6 +47,7 @@ class DownloadQueue(
         running = false
         _status.value = "Pausado"
         AppLog.i("Queue", "Pausado")
+        DownloadService.stop(appContext)
     }
 
     suspend fun enqueueFromUserInput(input: String): Pair<Int, String> = withContext(Dispatchers.IO) {
@@ -183,6 +186,20 @@ class DownloadQueue(
     @Deprecated("Use clearHistory", ReplaceWith("clearHistory()"))
     suspend fun clearFinished() = clearHistory()
 
+    private fun ensureForeground(text: String) {
+        DownloadService.startOrUpdate(appContext, text)
+    }
+
+    private suspend fun refreshForeground() {
+        val active = downloadDao.countActive()
+        val text = when {
+            active <= 0 -> "Finalizando…"
+            active == 1 -> "1 tema pendiente"
+            else -> "$active temas pendientes"
+        }
+        ensureForeground(text)
+    }
+
     private suspend fun pump() {
         mutex.withLock {
             if (!running) return
@@ -192,6 +209,7 @@ class DownloadQueue(
                 val needed = concurrency - workers
                 val queued = downloadDao.nextQueued(needed).filter { it.id !in inFlight }
                 if (queued.isEmpty()) break
+                ensureForeground("Descargando…")
                 for (job in queued) {
                     workers++
                     inFlight += job.id
@@ -211,8 +229,10 @@ class DownloadQueue(
             if (workers == 0 && downloadDao.nextQueued(1).isEmpty()) {
                 running = false
                 _status.value = "En espera"
+                DownloadService.stop(appContext)
             } else if (running) {
                 _status.value = "Procesando…"
+                refreshForeground()
             }
         }
     }
@@ -226,6 +246,7 @@ class DownloadQueue(
         }
         AppLog.i("Queue", "start job=${job.id} ${job.urlOrQuery.take(80)}")
         downloadDao.update(job.id, "running", 1f, null, System.currentTimeMillis())
+        refreshForeground()
         try {
             var url = job.urlOrQuery
             if (!LinkDetector.isYouTube(url) && !url.startsWith("ytsearch")) {
