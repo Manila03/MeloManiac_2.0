@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 class DownloadQueue(
@@ -46,9 +47,9 @@ class DownloadQueue(
         AppLog.i("Queue", "Pausado")
     }
 
-    suspend fun enqueueFromUserInput(input: String): Pair<Int, String> {
+    suspend fun enqueueFromUserInput(input: String): Pair<Int, String> = withContext(Dispatchers.IO) {
         val trimmed = input.trim()
-        if (trimmed.isEmpty()) return 0 to "Entrada vacía"
+        if (trimmed.isEmpty()) return@withContext 0 to "Entrada vacía"
         AppLog.i("Queue", "enqueue input: ${trimmed.take(120)}")
         val settings = settingsRepo.get()
 
@@ -64,7 +65,7 @@ class DownloadQueue(
                     is SpotifyResolve.Track -> {
                         enqueueSpotifyTrack(resolved.track)
                         start()
-                        return 1 to "Encolado: ${resolved.track.name}"
+                        return@withContext 1 to "Encolado: ${resolved.track.name}"
                     }
                     is SpotifyResolve.Collection -> {
                         val c = resolved.collection
@@ -85,7 +86,7 @@ class DownloadQueue(
                                 )
                             }
                             start()
-                            return c.tracks.size to "Álbum Spotify \"${c.name}\": ${c.tracks.size} temas"
+                            return@withContext c.tracks.size to "Álbum Spotify \"${c.name}\": ${c.tracks.size} temas"
                         } else {
                             val playlist = library.createPlaylist(c.name, c.externalUrl)
                             c.tracks.forEach { t ->
@@ -103,7 +104,7 @@ class DownloadQueue(
                                 )
                             }
                             start()
-                            return c.tracks.size to "Playlist Spotify \"${c.name}\": ${c.tracks.size} temas"
+                            return@withContext c.tracks.size to "Playlist Spotify \"${c.name}\": ${c.tracks.size} temas"
                         }
                     }
                 }
@@ -130,19 +131,19 @@ class DownloadQueue(
                         )
                     }
                     start()
-                    return hits.size to "Playlist de YouTube: ${hits.size} temas"
+                    return@withContext hits.size to "Playlist de YouTube: ${hits.size} temas"
                 }
                 val vid = LinkDetector.youtubeVideoId(trimmed)
                 val url = if (vid != null) "https://www.youtube.com/watch?v=$vid" else trimmed
                 enqueue(url, meta { if (vid != null) put("youtubeId", vid) })
                 start()
-                return 1 to "Video de YouTube encolado"
+                return@withContext 1 to "Video de YouTube encolado"
             }
 
             else -> {
                 enqueue(trimmed, meta { put("title", trimmed); put("query", trimmed) })
                 start()
-                return 1 to "Búsqueda encolada: $trimmed"
+                return@withContext 1 to "Búsqueda encolada: $trimmed"
             }
         }
     }

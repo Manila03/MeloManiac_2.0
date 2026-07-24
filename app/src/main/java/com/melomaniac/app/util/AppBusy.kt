@@ -1,14 +1,17 @@
 package com.melomaniac.app.util
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Global blocking busy state for UI actions (buttons).
  * While [message] is non-null, the app shows a full-screen loading overlay.
+ * Work always runs on [Dispatchers.IO] so network/disk never hits the main thread.
  */
 object AppBusy {
     private val mutex = Mutex()
@@ -21,7 +24,7 @@ object AppBusy {
         _message.value = label
         AppLog.i("Busy", label)
         try {
-            block()
+            withContext(Dispatchers.IO) { block() }
         } catch (e: Exception) {
             AppLog.e("Busy", "Failed: $label", e)
             throw e

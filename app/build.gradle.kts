@@ -13,8 +13,8 @@ android {
         applicationId = "com.melomaniac.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "2.0.4"
+        versionCode = 7
+        versionName = "2.0.5"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
