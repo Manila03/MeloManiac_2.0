@@ -57,6 +57,7 @@ data class TrackEntity(
     val spotifyId: String? = null,
     val youtubeId: String? = null,
     val genre: String? = null,
+    val coverPath: String? = null,
     val isFavorite: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val lastPlayedAt: Long? = null,

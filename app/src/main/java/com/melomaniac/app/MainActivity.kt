@@ -157,6 +157,7 @@ fun MeloApp(
                     MiniPlayerBar(
                         title = playerState.title,
                         artist = playerState.artist,
+                        coverPath = playerState.coverPath,
                         playing = playerState.playing,
                         onToggle = { player.togglePlay() },
                         onOpen = { nav.navigate("nowPlaying") },

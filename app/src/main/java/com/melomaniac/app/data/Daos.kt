@@ -51,7 +51,8 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoinedJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName,
+               COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -62,7 +63,8 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoinedJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName,
+               COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -95,7 +97,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -106,7 +108,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -118,7 +120,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -129,7 +131,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
@@ -140,7 +142,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         INNER JOIN playlist_tracks pt ON pt.trackId = t.id
         LEFT JOIN artists a ON a.id = t.artistId
@@ -152,7 +154,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         INNER JOIN genre_tracks gt ON gt.trackId = t.id
         LEFT JOIN artists a ON a.id = t.artistId
@@ -164,7 +166,7 @@ interface LibraryDao {
 
     @Query(
         """
-        SELECT t.*, a.name AS artistName, al.name AS albumName, al.coverPath AS coverPathJoined
+        SELECT t.*, a.name AS artistName, al.name AS albumName, COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
         FROM tracks t
         INNER JOIN folder_tracks ft ON ft.trackId = t.id
         LEFT JOIN artists a ON a.id = t.artistId
@@ -173,6 +175,18 @@ interface LibraryDao {
         """,
     )
     fun observeTracksByFolder(folderId: String): Flow<List<TrackRow>>
+
+    @Query("UPDATE albums SET coverPath = :coverPath WHERE id = :id AND (coverPath IS NULL OR coverPath = '')")
+    suspend fun setAlbumCoverIfEmpty(id: String, coverPath: String)
+
+    @Query("UPDATE playlists SET coverPath = :coverPath WHERE id = :id AND (coverPath IS NULL OR coverPath = '')")
+    suspend fun setPlaylistCoverIfEmpty(id: String, coverPath: String)
+
+    @Query("SELECT COUNT(*) FROM albums WHERE coverPath = :path")
+    suspend fun countAlbumsWithCover(path: String): Int
+
+    @Query("SELECT COUNT(*) FROM tracks WHERE coverPath = :path")
+    suspend fun countTracksWithCover(path: String): Int
 
     @Query("SELECT * FROM artists WHERE id = :id")
     suspend fun getArtist(id: String): ArtistEntity?

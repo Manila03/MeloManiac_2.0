@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import com.melomaniac.app.player.PlayerController
+import com.melomaniac.app.ui.CoverArt
 import com.melomaniac.app.ui.formatMs
 import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.ui.theme.Background
@@ -55,15 +56,7 @@ fun NowPlayingScreen(player: PlayerController) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Spacer(Modifier.height(24.dp))
-        Box(
-            Modifier
-                .size(260.dp)
-                .clip(RoundedCornerShape(16.dp))
-                .background(Surface),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text("♪", fontSize = 72.sp, color = Accent)
-        }
+        CoverArt(path = state.coverPath, size = 260.dp)
         Spacer(Modifier.height(24.dp))
         Text(
             state.title ?: "Nada en reproducción",

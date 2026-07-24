@@ -78,9 +78,10 @@ Sin Web API ni OAuth. MeloManiac lee metadata pública del embed de Spotify (`op
 ## Uso
 
 1. Ajustes → Inicializar binarios (yt-dlp/ffmpeg)
-2. Buscar → pegá URL YouTube/Spotify o texto
+2. Buscar → escribí texto (resultados YouTube + biblioteca) o pegá URL YouTube/Spotify
 3. Mientras hay cola activa verás la notificación **MeloManiac descargando** (foreground service + wake lock) para que siga con pantalla apagada
-4. Reproducí desde Biblioteca (borrar tema con el ícono de basura)
+4. Las portadas se guardan al descargar y se muestran en listas / mini player / now playing
+5. Reproducí desde Biblioteca (borrar tema con el ícono de basura)
 
 En Android 13+: permití notificaciones a MeloManiac si el sistema lo pide.
 

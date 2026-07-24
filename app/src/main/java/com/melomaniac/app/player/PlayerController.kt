@@ -27,6 +27,7 @@ data class PlayerUiState(
     val playing: Boolean = false,
     val title: String? = null,
     val artist: String? = null,
+    val coverPath: String? = null,
     val trackId: String? = null,
     val positionMs: Long = 0,
     val durationMs: Long = 0,
@@ -127,10 +128,12 @@ class PlayerController(
     private fun syncFromPlayer() {
         val c = controller ?: return
         val item = c.currentMediaItem
+        val artwork = item?.mediaMetadata?.artworkUri?.path
         _state.value = _state.value.copy(
             playing = c.isPlaying,
             title = item?.mediaMetadata?.title?.toString(),
             artist = item?.mediaMetadata?.artist?.toString(),
+            coverPath = artwork,
             trackId = item?.mediaId,
             positionMs = c.currentPosition,
             durationMs = c.duration.coerceAtLeast(0),
@@ -158,18 +161,19 @@ class PlayerController(
 
     private fun TrackRow.toMediaItem(): MediaItem {
         val uri = if (path.startsWith("file://") || path.startsWith("content://")) path else "file://$path"
-        // Ensure file exists path
         val fileUri = if (File(path).exists()) android.net.Uri.fromFile(File(path)) else android.net.Uri.parse(uri)
+        val meta = MediaMetadata.Builder()
+            .setTitle(title)
+            .setArtist(artistName ?: "Unknown")
+            .setAlbumTitle(albumName)
+        val cover = coverPath?.takeIf { File(it).exists() }
+        if (cover != null) {
+            meta.setArtworkUri(android.net.Uri.fromFile(File(cover)))
+        }
         return MediaItem.Builder()
             .setMediaId(id)
             .setUri(fileUri)
-            .setMediaMetadata(
-                MediaMetadata.Builder()
-                    .setTitle(title)
-                    .setArtist(artistName ?: "Unknown")
-                    .setAlbumTitle(albumName)
-                    .build(),
-            )
+            .setMediaMetadata(meta.build())
             .build()
     }
 }

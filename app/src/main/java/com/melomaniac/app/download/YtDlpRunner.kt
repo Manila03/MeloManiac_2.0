@@ -14,6 +14,7 @@ data class YtHit(
     val uploader: String,
     val durationMs: Long,
     val url: String,
+    val thumbnailUrl: String? = null,
 )
 
 data class DownloadResult(
@@ -38,7 +39,7 @@ class YtDlpRunner(
         binaryManager.ensureBinaries()
         val request = YoutubeDLRequest("ytsearch$limit:$query")
         request.addOption("--flat-playlist")
-        request.addOption("--print", "%(id)s\t%(title)s\t%(uploader)s\t%(duration)s")
+        request.addOption("--print", "%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s")
         request.addOption("--no-warnings")
         request.addOption("--ignore-no-formats-error")
         val out = execute(request, "search").out
@@ -71,7 +72,7 @@ class YtDlpRunner(
             val request = YoutubeDLRequest(clean)
             request.addOption("--flat-playlist")
             request.addOption("--yes-playlist")
-            request.addOption("--print", "%(id)s\t%(title)s\t%(uploader)s\t%(duration)s")
+            request.addOption("--print", "%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s")
             request.addOption("--no-warnings")
             request.addOption("--ignore-no-formats-error")
             parseTsvHits(execute(request, "playlist-print").out)
@@ -117,6 +118,8 @@ class YtDlpRunner(
                 url = o.optString("url").ifBlank {
                     o.optString("webpage_url").ifBlank { "https://www.youtube.com/watch?v=$id" }
                 },
+                thumbnailUrl = o.optString("thumbnail").takeIf { it.startsWith("http") }
+                    ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg",
             )
         }
         return items
@@ -141,12 +144,16 @@ class YtDlpRunner(
             val title = parts.getOrNull(1)?.trim().orEmpty().ifBlank { "Unknown" }
             val uploader = parts.getOrNull(2)?.trim().orEmpty()
             val durationSec = parts.getOrNull(3)?.trim()?.toDoubleOrNull() ?: 0.0
+            val thumb = parts.getOrNull(4)?.trim().orEmpty()
+                .takeIf { it.startsWith("http") }
+                ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
             items += YtHit(
                 id = id,
                 title = title,
                 uploader = uploader,
                 durationMs = (durationSec * 1000).toLong(),
                 url = "https://www.youtube.com/watch?v=$id",
+                thumbnailUrl = thumb,
             )
         }
         return items
@@ -328,6 +335,9 @@ class YtDlpRunner(
                     uploader = o.optString("uploader", o.optString("channel", "")),
                     durationMs = ((o.optDouble("duration", 0.0)) * 1000).toLong(),
                     url = o.optString("url").ifBlank { "https://www.youtube.com/watch?v=$id" },
+                    thumbnailUrl = o.optString("thumbnail").ifBlank { null }
+                        ?.takeIf { it.startsWith("http") }
+                        ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg",
                 )
             } catch (_: Exception) {
             }

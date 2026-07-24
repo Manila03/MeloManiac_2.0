@@ -25,6 +25,7 @@ class DownloadQueue(
     private val settingsRepo: SettingsRepository,
     private val ytDlp: YtDlpRunner,
     private val spotify: SpotifyScraper,
+    private val covers: CoverStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -79,6 +80,7 @@ class DownloadQueue(
                                         put("albumId", album.id)
                                         put("spotifyId", t.id)
                                         put("durationMs", t.durationMs)
+                                        (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
                                     },
                                 )
                             }
@@ -97,6 +99,7 @@ class DownloadQueue(
                                         put("playlistName", c.name)
                                         put("spotifyId", t.id)
                                         put("durationMs", t.durationMs)
+                                        (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
                                     },
                                 )
                             }
@@ -124,6 +127,7 @@ class DownloadQueue(
                                 put("playlistId", playlist.id)
                                 put("youtubeId", h.id)
                                 put("durationMs", h.durationMs)
+                                h.thumbnailUrl?.let { put("coverUrl", it) }
                             },
                         )
                     }
@@ -132,7 +136,15 @@ class DownloadQueue(
                 }
                 val vid = LinkDetector.youtubeVideoId(trimmed)
                 val url = if (vid != null) "https://www.youtube.com/watch?v=$vid" else trimmed
-                enqueue(url, meta { if (vid != null) put("youtubeId", vid) })
+                enqueue(
+                    url,
+                    meta {
+                        if (vid != null) {
+                            put("youtubeId", vid)
+                            put("coverUrl", "https://i.ytimg.com/vi/$vid/hqdefault.jpg")
+                        }
+                    },
+                )
                 start()
                 return@withContext 1 to "Video de YouTube encolado"
             }
@@ -154,6 +166,7 @@ class DownloadQueue(
                 put("albumName", t.albumName)
                 put("spotifyId", t.id)
                 put("durationMs", t.durationMs)
+                t.coverUrl?.let { put("coverUrl", it) }
             },
         )
     }
@@ -173,6 +186,21 @@ class DownloadQueue(
                 updatedAt = now,
             ),
         )
+    }
+
+    suspend fun enqueueYtHit(hit: YtHit): Pair<Int, String> = withContext(Dispatchers.IO) {
+        enqueue(
+            hit.url,
+            meta {
+                put("title", hit.title)
+                put("artist", hit.uploader)
+                put("youtubeId", hit.id)
+                put("durationMs", hit.durationMs)
+                hit.thumbnailUrl?.let { put("coverUrl", it) }
+            },
+        )
+        start()
+        1 to "Encolado: ${hit.title}"
     }
 
     suspend fun retry(id: String) {
@@ -258,6 +286,9 @@ class DownloadQueue(
                 val best = hits.firstOrNull() ?: error("Sin coincidencia en YouTube")
                 url = best.url
                 meta.put("youtubeId", best.id)
+                if (!meta.has("coverUrl") && !best.thumbnailUrl.isNullOrBlank()) {
+                    meta.put("coverUrl", best.thumbnailUrl)
+                }
             }
             val result = ytDlp.downloadAudio(
                 urlOrQuery = url,
@@ -269,6 +300,15 @@ class DownloadQueue(
                         downloadDao.update(job.id, "running", p.coerceAtMost(99f), null, System.currentTimeMillis())
                     }
                 },
+            )
+            val youtubeId = meta.optString("youtubeId").ifBlank { null } ?: result.youtubeId
+            val coverKey = meta.optString("spotifyId").ifBlank { null }
+                ?: youtubeId
+                ?: job.id
+            val coverFile = covers.obtain(
+                key = coverKey,
+                preferredUrl = meta.optString("coverUrl").ifBlank { null },
+                youtubeId = youtubeId,
             )
             library.insertDownloadedTrack(
                 title = meta.optString("title").ifBlank { result.title },
@@ -282,8 +322,9 @@ class DownloadQueue(
                 sourceUrl = url,
                 sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
                 spotifyId = meta.optString("spotifyId").ifBlank { null },
-                youtubeId = meta.optString("youtubeId").ifBlank { null } ?: result.youtubeId,
+                youtubeId = youtubeId,
                 genre = null,
+                coverPath = coverFile?.absolutePath,
             )
             downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
             AppLog.i("Queue", "done job=${job.id} → ${result.file.name}")

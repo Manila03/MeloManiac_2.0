@@ -2,6 +2,7 @@ package com.melomaniac.app.data
 
 import android.content.Context
 import com.melomaniac.app.download.BinaryManager
+import com.melomaniac.app.download.CoverStore
 import com.melomaniac.app.download.DownloadQueue
 import com.melomaniac.app.download.SpotifyScraper
 import com.melomaniac.app.download.YtDlpRunner
@@ -22,6 +23,7 @@ class AppContainer(context: Context) {
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
     val spotify = SpotifyScraper(appContext)
+    val covers = CoverStore(appContext)
 
     val downloadQueue = DownloadQueue(
         appContext = appContext,
@@ -30,6 +32,7 @@ class AppContainer(context: Context) {
         settingsRepo = settings,
         ytDlp = ytDlp,
         spotify = spotify,
+        covers = covers,
     )
 
     val player = PlayerController(appContext, library)

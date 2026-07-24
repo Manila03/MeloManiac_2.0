@@ -30,8 +30,6 @@ import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.AppSettings
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.TrackRow
-import com.melomaniac.app.download.LinkDetector
-import com.melomaniac.app.download.SpotifyUrls
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.update.ReleaseUpdate
@@ -78,7 +76,10 @@ fun LibraryHomeScreen(
                 onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
                 onDelete = { id ->
                     scope.launch {
-                        AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
+                        AppBusy.run("Borrando…") {
+                            val orphan = container.library.deleteTrack(id)
+                            container.covers.deleteIfExists(orphan)
+                        }
                     }
                 },
             )
@@ -106,96 +107,9 @@ fun BrowseLibraryScreen(onOpen: (String) -> Unit) {
     }
 }
 
-@Composable
-fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit) {
-    var query by remember { mutableStateOf("") }
-    var message by remember { mutableStateOf<String?>(null) }
-    var local by remember { mutableStateOf<List<TrackRow>>(emptyList()) }
-    val scope = rememberCoroutineScope()
-    val globalBusy by AppBusy.message.collectAsState()
-    val detected = remember(query) { LinkDetector.classify(query.trim()) }
 
-    Column(Modifier.padding(16.dp).fillMaxSize()) {
-        ScreenTitle("Buscar")
-        Muted("Pegá un link de YouTube/Spotify (tema, álbum o playlist) o buscá por texto.")
-        AppTextField(query, { query = it }, "URL o búsqueda…")
-        when (detected) {
-            "spotify" -> {
-                val kind = SpotifyUrls.parse(query.trim())?.first ?: "link"
-                Text(
-                    "Detectado: Spotify ($kind) — se resuelve por scraper público",
-                    color = Accent,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-            "youtube" -> {
-                val kind = if (LinkDetector.isYouTubePlaylistUrl(query.trim())) "playlist" else "video"
-                Text("Detectado: YouTube ($kind)", color = Accent, modifier = Modifier.padding(top = 4.dp))
-            }
-        }
-        PrimaryButton("Buscar / Encolar", onClick = {
-            scope.launch {
-                message = null
-                try {
-                    val q = query.trim()
-                    AppBusy.run(
-                        when (detected) {
-                            "spotify" -> "Resolviendo Spotify por scraper…"
-                            else -> "Buscando…"
-                        },
-                    ) {
-                        when {
-                            detected != null ||
-                                q.startsWith("spotify:") ||
-                                q.contains("http", ignoreCase = true) -> {
-                                val (_, msg) = container.downloadQueue.enqueueFromUserInput(q)
-                                message = msg
-                                local = emptyList()
-                            }
-                            else -> {
-                                local = container.library.search(q)
-                                message = if (local.isEmpty()) {
-                                    "Sin resultados locales. Podés encolar la búsqueda para YouTube."
-                                } else {
-                                    null
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    AppLog.e("Search", "Buscar / Encolar failed", e)
-                    message = e.message
-                }
-            }
-        }, enabled = globalBusy == null)
-        if (local.isNotEmpty() || (query.isNotBlank() && detected == null)) {
-            GhostButton("Encolar búsqueda en YouTube", onClick = {
-                scope.launch {
-                    try {
-                        val (_, msg) = AppBusy.run("Encolando…") {
-                            container.downloadQueue.enqueueFromUserInput(query)
-                        }
-                        message = msg
-                    } catch (e: Exception) {
-                        AppLog.e("Search", "Encolar YouTube failed", e)
-                        message = e.message
-                    }
-                }
-            })
-        }
-        message?.let { Text(it, color = Accent, modifier = Modifier.padding(vertical = 8.dp)) }
-        TrackList(
-            tracks = local,
-            onPlay = onPlay,
-            onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
-            onDelete = { id ->
-                scope.launch {
-                    AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
-                }
-            },
-        )
-    }
-}
+
+
 
 @Composable
 fun DownloadsScreen(container: AppContainer) {

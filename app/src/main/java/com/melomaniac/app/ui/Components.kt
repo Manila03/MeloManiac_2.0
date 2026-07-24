@@ -141,6 +141,8 @@ fun TrackList(
                     Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    CoverArt(path = track.coverPath, size = 52.dp)
+                    Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
                         Text(
@@ -217,6 +219,7 @@ fun AppTextField(
 fun MiniPlayerBar(
     title: String?,
     artist: String?,
+    coverPath: String? = null,
     playing: Boolean,
     onToggle: () -> Unit,
     onOpen: () -> Unit,
@@ -230,6 +233,8 @@ fun MiniPlayerBar(
             .clickable(onClick = onOpen),
     ) {
         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            CoverArt(path = coverPath, size = 44.dp)
+            Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
                 Text(artist.orEmpty(), color = TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)

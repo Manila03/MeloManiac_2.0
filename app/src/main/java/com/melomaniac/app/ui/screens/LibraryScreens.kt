@@ -39,7 +39,10 @@ private fun LibraryTrackList(
         onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
         onDelete = { id ->
             scope.launch {
-                AppBusy.run("Borrando…") { container.library.deleteTrack(id) }
+                AppBusy.run("Borrando…") {
+                    val orphan = container.library.deleteTrack(id)
+                    container.covers.deleteIfExists(orphan)
+                }
             }
         },
     )

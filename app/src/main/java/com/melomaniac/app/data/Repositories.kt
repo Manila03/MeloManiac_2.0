@@ -67,9 +67,12 @@ class LibraryRepository(private val dao: LibraryDao) {
         spotifyId: String?,
         youtubeId: String?,
         genre: String?,
+        coverPath: String? = null,
     ): TrackEntity {
         val artist = getOrCreateArtist(artistName ?: "Unknown Artist")
-        val resolvedAlbumId = albumId ?: albumName?.let { getOrCreateAlbum(it, artist.id).id }
+        val resolvedAlbumId = albumId
+            ?: albumName?.takeIf { it.isNotBlank() }?.let { getOrCreateAlbum(it, artist.id).id }
+            ?: getOrCreateAlbum(title, artist.id).id
         val track = TrackEntity(
             id = newId(),
             title = title,
@@ -83,8 +86,13 @@ class LibraryRepository(private val dao: LibraryDao) {
             spotifyId = spotifyId,
             youtubeId = youtubeId,
             genre = genre,
+            coverPath = coverPath,
         )
         dao.upsertTrack(track)
+        if (!coverPath.isNullOrBlank()) {
+            dao.setAlbumCoverIfEmpty(resolvedAlbumId, coverPath)
+            if (playlistId != null) dao.setPlaylistCoverIfEmpty(playlistId, coverPath)
+        }
         if (!genre.isNullOrBlank()) {
             val g = dao.findGenreByName(genre) ?: GenreEntity(newId(), genre.trim()).also { dao.upsertGenre(it) }
             dao.insertGenreTrack(GenreTrackEntity(g.id, track.id))
@@ -96,8 +104,9 @@ class LibraryRepository(private val dao: LibraryDao) {
     suspend fun toggleFavorite(id: String) = dao.toggleFavorite(id)
 
     /** Deletes DB rows and the audio file on disk. */
-    suspend fun deleteTrack(id: String) {
-        val track = dao.getTrack(id) ?: return
+    suspend fun deleteTrack(id: String): String? {
+        val track = dao.getTrack(id) ?: return null
+        val cover = track.coverPath
         dao.deletePlaylistLinks(id)
         dao.deleteGenreLinks(id)
         dao.deleteFolderLinks(id)
@@ -107,6 +116,12 @@ class LibraryRepository(private val dao: LibraryDao) {
             val file = java.io.File(track.path)
             if (file.exists()) file.delete()
         }
+        // Return cover path if orphaned so caller can delete the file.
+        if (!cover.isNullOrBlank()) {
+            val stillUsed = dao.countTracksWithCover(cover) + dao.countAlbumsWithCover(cover)
+            if (stillUsed == 0) return cover
+        }
+        return null
     }
 
     suspend fun recordPlay(trackId: String) {

@@ -20,7 +20,7 @@ import androidx.room.RoomDatabase
         DownloadJobEntity::class,
         SettingEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
