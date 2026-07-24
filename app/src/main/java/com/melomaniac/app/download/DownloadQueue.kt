@@ -22,7 +22,7 @@ class DownloadQueue(
     private val library: LibraryRepository,
     private val settingsRepo: SettingsRepository,
     private val ytDlp: YtDlpRunner,
-    private val spotify: SpotifyApi,
+    private val spotify: SpotifyScraper,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -51,17 +51,11 @@ class DownloadQueue(
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return@withContext 0 to "Entrada vacía"
         AppLog.i("Queue", "enqueue input: ${trimmed.take(120)}")
-        val settings = settingsRepo.get()
 
         when {
             LinkDetector.isSpotify(trimmed) -> {
-                if (settings.spotifyClientId.isBlank() || settings.spotifyClientSecret.isBlank()) {
-                    error(
-                        "Spotify detectado (${SpotifyApi().parseUrl(trimmed)?.first ?: "link"}). " +
-                            "Configurá Client ID y Secret en Ajustes para importar álbumes/playlists.",
-                    )
-                }
-                when (val resolved = spotify.resolve(trimmed, settings.spotifyClientId, settings.spotifyClientSecret)) {
+                AppLog.i("Queue", "Spotify scraper: ${SpotifyUrls.parse(trimmed)?.first ?: "link"}")
+                when (val resolved = spotify.resolve(trimmed)) {
                     is SpotifyResolve.Track -> {
                         enqueueSpotifyTrack(resolved.track)
                         start()

@@ -13,7 +13,6 @@ App Android personal para buscar, descargar y reproducir música offline en FLAC
 
 - Android Studio / SDK
 - Teléfono arm64
-- Spotify Client ID/Secret (opcional, para links de Spotify)
 
 ## Build APK (un comando)
 
@@ -70,24 +69,17 @@ GitHub Actions construye el APK y lo adjunta al Release como `MeloManiac.apk`.
 
 ## Spotify
 
-Flujo (Web API 2026):
+Sin Web API ni OAuth. MeloManiac lee metadata pública del embed de Spotify (`open.spotify.com/embed/…`) y, si hace falta, de la página abierta o un WebView oculto.
 
-1. Creá una app en [Spotify Developer Dashboard](https://developer.spotify.com/dashboard).
-2. Redirect URI exacto: `melomaniac://spotify-callback`
-3. En la app: Ajustes → Client ID/Secret → **Conectar Spotify** (login OAuth).
-4. Pegá un álbum/playlist/tema en Buscar. La playlist tiene que ser tuya o colaborativa (la cuenta conectada).
-5. MeloManiac resuelve metadatos vía Spotify y descarga el audio desde YouTube con yt-dlp.
-
-Álbumes/temas de catálogo pueden usar Client Credentials; **playlists requieren la cuenta conectada**.
-
-Ver [migración Feb 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
+1. Pegá un link público de tema / álbum / playlist en **Buscar** (o compartilo a la app).
+2. La app encola queries `"título artista"` y descarga el audio desde YouTube con yt-dlp.
+3. Playlists **privadas** no se pueden resolver (no hay cookies de sesión).
 
 ## Uso
 
-1. Ajustes → Spotify credentials + Conectar Spotify
-2. Ajustes → Inicializar binarios (yt-dlp/ffmpeg)
-3. Buscar → pegá URL YouTube/Spotify o texto
-4. Reproducí desde Biblioteca (borrar tema con el ícono de basura)
+1. Ajustes → Inicializar binarios (yt-dlp/ffmpeg)
+2. Buscar → pegá URL YouTube/Spotify o texto
+3. Reproducí desde Biblioteca (borrar tema con el ícono de basura)
 
 ## Notas
 

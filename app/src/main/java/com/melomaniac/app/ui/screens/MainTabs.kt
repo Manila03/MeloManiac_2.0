@@ -31,7 +31,7 @@ import com.melomaniac.app.data.AppSettings
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.TrackRow
 import com.melomaniac.app.download.LinkDetector
-import com.melomaniac.app.download.SpotifyApi
+import com.melomaniac.app.download.SpotifyUrls
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.update.ReleaseUpdate
@@ -121,8 +121,12 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
         AppTextField(query, { query = it }, "URL o búsqueda…")
         when (detected) {
             "spotify" -> {
-                val kind = SpotifyApi().parseUrl(query.trim())?.first ?: "link"
-                Text("Detectado: Spotify ($kind)", color = Accent, modifier = Modifier.padding(top = 4.dp))
+                val kind = SpotifyUrls.parse(query.trim())?.first ?: "link"
+                Text(
+                    "Detectado: Spotify ($kind) — se resuelve por scraper público",
+                    color = Accent,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
             }
             "youtube" -> {
                 val kind = if (LinkDetector.isYouTubePlaylistUrl(query.trim())) "playlist" else "video"
@@ -134,7 +138,12 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                 message = null
                 try {
                     val q = query.trim()
-                    AppBusy.run("Buscando…") {
+                    AppBusy.run(
+                        when (detected) {
+                            "spotify" -> "Resolviendo Spotify por scraper…"
+                            else -> "Buscando…"
+                        },
+                    ) {
                         when {
                             detected != null ||
                                 q.startsWith("spotify:") ||
@@ -271,11 +280,8 @@ fun SettingsScreen(container: AppContainer) {
     val updater = container.appUpdater
     val globalBusy by AppBusy.message.collectAsState()
 
-    val spotifyConnected = remember { mutableStateOf(container.spotifyAuth.isConnected()) }
-
     LaunchedEffect(Unit) {
         settings = container.settings.get()
-        spotifyConnected.value = container.spotifyAuth.isConnected()
     }
 
     fun save(patch: AppSettings) {
@@ -385,36 +391,12 @@ fun SettingsScreen(container: AppContainer) {
             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
             modifier = Modifier.padding(top = 8.dp),
         )
-        Text("Spotify API", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
+        Text("Spotify", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
         Muted(
-            "Client ID/Secret + Conectar Spotify (OAuth). Playlists requieren login de la cuenta dueña " +
-                "(cambios Web API 2026). Redirect URI en el Dashboard: melomaniac://spotify-callback",
+            "Spotify se resuelve por scraper público (sin API ni login). " +
+                "Pegá un link público de tema, álbum o playlist en Buscar; " +
+                "las playlists privadas no se pueden leer.",
         )
-        AppTextField(settings.spotifyClientId, { save(settings.copy(spotifyClientId = it)) }, "Client ID")
-        AppTextField(settings.spotifyClientSecret, { save(settings.copy(spotifyClientSecret = it)) }, "Client Secret")
-        Text(
-            if (spotifyConnected.value) "Cuenta Spotify: conectada" else "Cuenta Spotify: no conectada",
-            color = if (spotifyConnected.value) Accent else TextSecondary,
-            modifier = Modifier.padding(top = 8.dp),
-        )
-        PrimaryButton(
-            if (spotifyConnected.value) "Reconectar Spotify" else "Conectar Spotify",
-            onClick = {
-                try {
-                    context.startActivity(container.spotifyAuth.beginLogin(settings.spotifyClientId))
-                } catch (e: Exception) {
-                    status = e.message
-                }
-            },
-            enabled = globalBusy == null && settings.spotifyClientId.isNotBlank(),
-        )
-        if (spotifyConnected.value) {
-            GhostButton("Desconectar Spotify") {
-                container.spotifyAuth.disconnect()
-                spotifyConnected.value = false
-                status = "Spotify desconectado"
-            }
-        }
         Text(
             "yt-dlp / ffmpeg (embebidos para Android 10+; no usan filesDir)",
             color = TextSecondary,

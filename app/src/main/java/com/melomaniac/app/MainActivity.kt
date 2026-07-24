@@ -93,25 +93,6 @@ class MainActivity : ComponentActivity() {
 
     private fun handleIncoming(intent: Intent?) {
         if (intent == null) return
-        val data = intent.data
-        if (intent.action == Intent.ACTION_VIEW &&
-            data?.scheme == "melomaniac" &&
-            data.host == "spotify-callback"
-        ) {
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                try {
-                    AppBusy.run("Conectando Spotify…") {
-                        val s = container.settings.get()
-                        container.spotifyAuth.handleRedirect(data, s.spotifyClientId, s.spotifyClientSecret)
-                    }
-                    Toast.makeText(this@MainActivity, "Spotify conectado", Toast.LENGTH_LONG).show()
-                } catch (e: Exception) {
-                    AppLog.e("SpotifyAuth", "callback failed", e)
-                    Toast.makeText(this@MainActivity, e.message ?: "Error Spotify", Toast.LENGTH_LONG).show()
-                }
-            }
-            return
-        }
 
         val raw = when (intent.action) {
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
