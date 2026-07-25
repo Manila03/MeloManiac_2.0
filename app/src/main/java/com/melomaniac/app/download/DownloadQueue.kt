@@ -29,8 +29,10 @@ class DownloadQueue(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
+    private val commitMutex = Mutex()
     private var workers = 0
     private var running = false
+    @Volatile private var resetGeneration = 0L
     private val inFlight = mutableSetOf<String>()
 
     private val _status = MutableStateFlow("En espera")
@@ -48,7 +50,24 @@ class DownloadQueue(
         running = false
         _status.value = "Pausado"
         AppLog.i("Queue", "Pausado")
+        ytDlp.destroyAll()
         DownloadService.stop(appContext)
+    }
+
+    /**
+     * Invalidates in-flight workers and prevents them from writing while [wipe] runs.
+     * Destroys live yt-dlp processes so process ids cannot collide on the next run.
+     */
+    suspend fun resetStorage(wipe: suspend () -> Unit) {
+        mutex.withLock {
+            running = false
+            resetGeneration++
+            _status.value = "En espera"
+            AppLog.i("Queue", "Reset generation=$resetGeneration")
+            ytDlp.destroyAll()
+            DownloadService.stop(appContext)
+        }
+        commitMutex.withLock { wipe() }
     }
 
     suspend fun enqueueFromUserInput(input: String): Pair<Int, String> = withContext(Dispatchers.IO) {
@@ -239,11 +258,12 @@ class DownloadQueue(
                 if (queued.isEmpty()) break
                 ensureForeground("Descargando…")
                 for (job in queued) {
+                    val workerGeneration = resetGeneration
                     workers++
                     inFlight += job.id
                     scope.launch {
                         try {
-                            process(job)
+                            process(job, workerGeneration)
                         } finally {
                             mutex.withLock {
                                 workers--
@@ -265,7 +285,7 @@ class DownloadQueue(
         }
     }
 
-    private suspend fun process(job: DownloadJobEntity) {
+    private suspend fun process(job: DownloadJobEntity, workerGeneration: Long) {
         val settings = settingsRepo.get()
         val meta = try {
             JSONObject(job.metaJson)
@@ -273,7 +293,13 @@ class DownloadQueue(
             JSONObject()
         }
         AppLog.i("Queue", "start job=${job.id} ${job.urlOrQuery.take(80)}")
-        downloadDao.update(job.id, "running", 1f, null, System.currentTimeMillis())
+        val started = commitIfCurrent(workerGeneration) {
+            downloadDao.update(job.id, "running", 1f, null, System.currentTimeMillis())
+        }
+        if (!started) {
+            AppLog.i("Queue", "skipped stale job=${job.id} after reset")
+            return
+        }
         refreshForeground()
         try {
             var url = job.urlOrQuery
@@ -297,40 +323,71 @@ class DownloadQueue(
                 fallbackQuality = settings.fallbackQuality,
                 onProgress = { p ->
                     scope.launch {
-                        downloadDao.update(job.id, "running", p.coerceAtMost(99f), null, System.currentTimeMillis())
+                        commitIfCurrent(workerGeneration) {
+                            downloadDao.update(
+                                job.id,
+                                "running",
+                                p.coerceAtMost(99f),
+                                null,
+                                System.currentTimeMillis(),
+                            )
+                        }
                     }
                 },
             )
+            if (workerGeneration != resetGeneration) {
+                result.file.delete()
+                AppLog.i("Queue", "discarded stale job=${job.id} after reset")
+                return
+            }
             val youtubeId = meta.optString("youtubeId").ifBlank { null } ?: result.youtubeId
             val coverKey = meta.optString("spotifyId").ifBlank { null }
                 ?: youtubeId
                 ?: job.id
-            val coverFile = covers.obtain(
-                key = coverKey,
-                preferredUrl = meta.optString("coverUrl").ifBlank { null },
-                youtubeId = youtubeId,
-            )
-            library.insertDownloadedTrack(
-                title = meta.optString("title").ifBlank { result.title },
-                artistName = meta.optString("artist").ifBlank { null } ?: result.artist,
-                albumName = meta.optString("albumName").ifBlank { null },
-                albumId = meta.optString("albumId").ifBlank { null },
-                playlistId = meta.optString("playlistId").ifBlank { null },
-                path = result.file.absolutePath,
-                format = result.format,
-                durationMs = if (meta.optLong("durationMs") > 0) meta.optLong("durationMs") else result.durationMs,
-                sourceUrl = url,
-                sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
-                spotifyId = meta.optString("spotifyId").ifBlank { null },
-                youtubeId = youtubeId,
-                genre = null,
-                coverPath = coverFile?.absolutePath,
-            )
-            downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+            val committed = commitIfCurrent(workerGeneration) {
+                val coverFile = covers.obtain(
+                    key = coverKey,
+                    preferredUrl = meta.optString("coverUrl").ifBlank { null },
+                    youtubeId = youtubeId,
+                )
+                library.insertDownloadedTrack(
+                    title = meta.optString("title").ifBlank { result.title },
+                    artistName = meta.optString("artist").ifBlank { null } ?: result.artist,
+                    albumName = meta.optString("albumName").ifBlank { null },
+                    albumId = meta.optString("albumId").ifBlank { null },
+                    playlistId = meta.optString("playlistId").ifBlank { null },
+                    path = result.file.absolutePath,
+                    format = result.format,
+                    durationMs = if (meta.optLong("durationMs") > 0) meta.optLong("durationMs") else result.durationMs,
+                    sourceUrl = url,
+                    sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
+                    spotifyId = meta.optString("spotifyId").ifBlank { null },
+                    youtubeId = youtubeId,
+                    genre = null,
+                    coverPath = coverFile?.absolutePath,
+                )
+                downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+            }
+            if (!committed) {
+                result.file.delete()
+                AppLog.i("Queue", "discarded stale job=${job.id} during reset")
+                return
+            }
             AppLog.i("Queue", "done job=${job.id} → ${result.file.name}")
         } catch (e: Exception) {
             AppLog.e("Queue", "failed job=${job.id}", e)
-            downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
+            commitIfCurrent(workerGeneration) {
+                downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
+            }
         }
+    }
+
+    private suspend fun commitIfCurrent(
+        workerGeneration: Long,
+        block: suspend () -> Unit,
+    ): Boolean = commitMutex.withLock {
+        if (workerGeneration != resetGeneration) return@withLock false
+        block()
+        true
     }
 }

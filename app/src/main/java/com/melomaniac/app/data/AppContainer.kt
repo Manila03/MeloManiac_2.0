@@ -51,16 +51,16 @@ class AppContainer(context: Context) {
      */
     suspend fun resetLibrary() = withContext(Dispatchers.IO) {
         AppLog.i(TAG, "resetLibrary: stopping queue + player")
-        downloadQueue.stop()
         withContext(Dispatchers.Main) { player.stopAndClear() }
 
-        AppLog.i(TAG, "resetLibrary: clearAllTables")
-        db.clearAllTables()
-
-        wipeDir(musicDir)
-        wipeDir(coversDir)
-        musicDir.mkdirs()
-        coversDir.mkdirs()
+        downloadQueue.resetStorage {
+            AppLog.i(TAG, "resetLibrary: clearAllTables")
+            db.clearAllTables()
+            wipeDir(musicDir)
+            wipeDir(coversDir)
+            musicDir.mkdirs()
+            coversDir.mkdirs()
+        }
         AppLog.i(TAG, "resetLibrary: done")
     }
 

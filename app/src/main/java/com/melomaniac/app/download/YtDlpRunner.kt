@@ -7,6 +7,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 data class YtHit(
     val id: String,
@@ -30,8 +33,23 @@ class YtDlpRunner(
     private val binaryManager: BinaryManager,
     private val musicDir: File,
 ) {
+    private val processSeq = AtomicLong(0)
+    private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
+
     init {
         if (!musicDir.exists()) musicDir.mkdirs()
+    }
+
+    /** Kills every tracked yt-dlp process (pause / reset). Safe if already finished. */
+    fun destroyAll() {
+        val ids = activeProcessIds.toList()
+        if (ids.isEmpty()) return
+        AppLog.i("yt-dlp", "destroyAll: ${ids.size} process(es)")
+        for (id in ids) {
+            runCatching { YoutubeDL.getInstance().destroyProcessById(id) }
+                .onFailure { AppLog.w("yt-dlp", "destroy $id: ${it.message}") }
+            activeProcessIds.remove(id)
+        }
     }
 
     suspend fun search(query: String, limit: Int = 8): List<YtHit> = withContext(Dispatchers.IO) {
@@ -190,7 +208,7 @@ class YtDlpRunner(
             applyYoutubeHardening(request, strategy)
 
             val response = try {
-                execute(request, "$jobId-$strategyIndex") { progress, _, line ->
+                execute(request, "dl-$jobId-s$strategyIndex") { progress, _, line ->
                     if (progress > 0f) onProgress(progress)
                     val trimmed = line?.trim().orEmpty()
                     if (trimmed.isNotEmpty() && !trimmed.startsWith("{")) {
@@ -200,6 +218,11 @@ class YtDlpRunner(
             } catch (e: Exception) {
                 AppLog.e("yt-dlp", "job=$jobId strategy#$strategyIndex failed", e)
                 val msg = e.message.orEmpty()
+                if (msg.contains("Interrupted", ignoreCase = true) ||
+                    msg.contains("destroyed", ignoreCase = true)
+                ) {
+                    throw e
+                }
                 val is403 = msg.contains("403") || msg.contains("Forbidden", ignoreCase = true)
                 if (is403 && strategyIndex + 1 < CLIENT_STRATEGIES.size) {
                     AppLog.w("yt-dlp", "403 → next player_client")
@@ -299,25 +322,78 @@ class YtDlpRunner(
 
     private data class ExecResult(val out: String, val err: String, val exitCode: Int)
 
+    /**
+     * Process ids for youtubedl-android must be unique in its in-memory map.
+     * This is NOT a Room/DB constraint — a clash means a previous yt-dlp process
+     * entry was not cleared (pause/reset/crash), not that the track exists in the library.
+     */
+    private fun nextProcessId(prefix: String): String {
+        val safe = prefix.replace(Regex("[^a-zA-Z0-9_-]"), "_").take(24).ifBlank { "yt" }
+        val seq = processSeq.incrementAndGet()
+        val uuid = UUID.randomUUID().toString().replace("-", "").take(12)
+        return "$safe-$seq-$uuid"
+    }
+
+    private fun isProcessIdClash(msg: String): Boolean =
+        msg.contains("Process id already exists", ignoreCase = true)
+
     private fun execute(
         request: YoutubeDLRequest,
-        processId: String,
+        processPrefix: String,
         callback: ((Float, Long, String?) -> Unit)? = null,
     ): ExecResult {
-        AppLog.d("yt-dlp", "exec[$processId]")
-        val response = if (callback != null) {
-            YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
-                callback(progress, eta, line)
+        var lastError: Exception? = null
+        repeat(4) { attempt ->
+            val processId = nextProcessId(processPrefix)
+            AppLog.d("yt-dlp", "exec[$processId] attempt=${attempt + 1}")
+            activeProcessIds.add(processId)
+            try {
+                // Defensive: clear any stale library entry before register (noop if absent).
+                runCatching { YoutubeDL.getInstance().destroyProcessById(processId) }
+                val response = if (callback != null) {
+                    YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
+                        callback(progress, eta, line)
+                    }
+                } else {
+                    YoutubeDL.getInstance().execute(request, processId, null)
+                }
+                return finishExecuteResult(processId, response.out, response.err, response.exitCode)
+            } catch (e: Exception) {
+                lastError = e
+                val msg = e.message.orEmpty()
+                activeProcessIds.remove(processId)
+                runCatching { YoutubeDL.getInstance().destroyProcessById(processId) }
+                if (isProcessIdClash(msg) && attempt < 3) {
+                    AppLog.w("yt-dlp", "process id clash on $processId — retry ${attempt + 1}")
+                    Thread.sleep(50L * (attempt + 1))
+                    return@repeat
+                }
+                if (isProcessIdClash(msg)) {
+                    throw IllegalStateException(
+                        "Motor de descarga ocupado (proceso yt-dlp residual). Pausá/reanudá o reintentá el tema.",
+                        e,
+                    )
+                }
+                throw e
+            } finally {
+                activeProcessIds.remove(processId)
             }
-        } else {
-            YoutubeDL.getInstance().execute(request, processId, null)
         }
-        AppLog.i("yt-dlp", "job=$processId exit=${response.exitCode}")
-        if (response.exitCode != 0) {
-            val detail = (response.err.ifBlank { response.out }).takeLast(800)
-            error(detail.ifBlank { "yt-dlp exit ${response.exitCode}" })
+        throw lastError ?: IllegalStateException("yt-dlp execute failed")
+    }
+
+    private fun finishExecuteResult(
+        processId: String,
+        out: String,
+        err: String,
+        exitCode: Int,
+    ): ExecResult {
+        AppLog.i("yt-dlp", "job=$processId exit=$exitCode")
+        if (exitCode != 0) {
+            val detail = (err.ifBlank { out }).takeLast(800)
+            error(detail.ifBlank { "yt-dlp exit $exitCode" })
         }
-        return ExecResult(response.out, response.err, response.exitCode)
+        return ExecResult(out, err, exitCode)
     }
 
     private fun parseHits(stdout: String): List<YtHit> {
