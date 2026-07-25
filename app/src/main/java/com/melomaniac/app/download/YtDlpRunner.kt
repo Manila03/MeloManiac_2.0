@@ -35,6 +35,7 @@ class YtDlpRunner(
 ) {
     private val processSeq = AtomicLong(0)
     private val activeProcessIds = ConcurrentHashMap.newKeySet<String>()
+    private val audioExtensions = setOf("flac", "m4a", "mp3", "opus", "webm", "ogg", "wav", "aac")
 
     init {
         if (!musicDir.exists()) musicDir.mkdirs()
@@ -192,12 +193,18 @@ class YtDlpRunner(
             else -> "ytsearch1:$urlOrQuery"
         }
 
+        // Isolate each job so concurrent playlist downloads cannot steal each other's files.
+        val staging = File(musicDir, ".staging/$jobId").apply {
+            if (exists()) deleteRecursively()
+            mkdirs()
+        }
+
         fun attempt(flac: Boolean, strategyIndex: Int): DownloadResult {
             val strategy = CLIENT_STRATEGIES[strategyIndex]
             if (!flac) AppLog.w("yt-dlp", "job=$jobId fallback (no FLAC)")
             AppLog.i("yt-dlp", "job=$jobId client strategy #${strategyIndex + 1}")
-            val before = musicDir.listFiles()?.map { it.absolutePath }?.toSet().orEmpty()
-            val outTemplate = File(musicDir, "%(title).80B-%(id)s.%(ext)s").absolutePath
+            // Unique template inside staging — never scan the shared music/ folder.
+            val outTemplate = File(staging, "%(id)s.%(ext)s").absolutePath
             val request = YoutubeDLRequest(input)
             applyAudioFormat(request, flac, fallbackQuality)
             request.addOption("--no-playlist")
@@ -217,6 +224,7 @@ class YtDlpRunner(
                 }
             } catch (e: Exception) {
                 AppLog.e("yt-dlp", "job=$jobId strategy#$strategyIndex failed", e)
+                staging.listFiles()?.forEach { runCatching { it.delete() } }
                 val msg = e.message.orEmpty()
                 if (msg.contains("Interrupted", ignoreCase = true) ||
                     msg.contains("destroyed", ignoreCase = true)
@@ -241,26 +249,80 @@ class YtDlpRunner(
                 ?: info?.optString("uploader")?.ifBlank { null }
             val youtubeId = info?.optString("id")?.ifBlank { null }
             val durationMs = ((info?.optDouble("duration") ?: 0.0) * 1000).toLong()
-            val ext = if (flac) "flac" else if (fallbackQuality == "320") "mp3" else "m4a"
-            val requested = info?.optJSONArray("requested_downloads")
+            val staged = resolveStagedAudio(staging, info, youtubeId)
+            val ext = staged.extension.lowercase().ifBlank {
+                if (flac) "flac" else if (fallbackQuality == "320") "mp3" else "m4a"
+            }
+            val finalFile = moveToLibrary(staged, youtubeId, jobId, ext)
+            AppLog.i("yt-dlp", "job=$jobId ok → ${finalFile.name} ($ext)")
+            return DownloadResult(finalFile, ext, sanitize(title), artist, durationMs, youtubeId)
+        }
+
+        try {
+            return@withContext attempt(preferFlac, 0)
+        } finally {
+            runCatching { staging.deleteRecursively() }
+        }
+    }
+
+    private fun resolveStagedAudio(staging: File, info: JSONObject?, youtubeId: String?): File {
+        val candidates = listOfNotNull(
+            info?.optJSONArray("requested_downloads")
                 ?.optJSONObject(0)
                 ?.optString("filepath")
-            val after = musicDir.listFiles().orEmpty()
-            val file = when {
-                !requested.isNullOrBlank() && File(requested).exists() -> File(requested)
-                else -> after
-                    .filter { it.absolutePath !in before }
-                    .filter { it.extension.lowercase() in listOf("flac", "m4a", "mp3", "opus", "webm") }
-                    .maxByOrNull { it.lastModified() }
-                    ?: after
-                        .filter { it.extension.lowercase() in listOf("flac", "m4a", "mp3", "opus", "webm") }
-                        .maxByOrNull { it.lastModified() }
-                    ?: error("Download finished but file missing")
+                ?.ifBlank { null },
+            info?.optString("filepath")?.ifBlank { null },
+            info?.optString("_filename")?.ifBlank { null },
+        ).map { File(it) }
+
+        for (c in candidates) {
+            if (c.exists() && c.isFile && isUnder(c, staging) && isAudioFile(c)) {
+                return c
             }
-            AppLog.i("yt-dlp", "job=$jobId ok → ${file.name} ($ext)")
-            return DownloadResult(file, ext, sanitize(title), artist, durationMs, youtubeId)
         }
-        attempt(preferFlac, 0)
+
+        val audioFiles = staging.listFiles()
+            ?.filter { it.isFile && isAudioFile(it) }
+            .orEmpty()
+
+        when {
+            audioFiles.isEmpty() -> error("Download finished but file missing in staging")
+            audioFiles.size == 1 -> return audioFiles.first()
+            else -> {
+                // Prefer file whose name contains the YouTube id for this job.
+                val byId = youtubeId?.let { id ->
+                    audioFiles.firstOrNull { it.nameWithoutExtension.contains(id) }
+                }
+                if (byId != null) return byId
+                AppLog.w("yt-dlp", "multiple staged files (${audioFiles.size}); using newest in staging only")
+                return audioFiles.maxByOrNull { it.lastModified() }!!
+            }
+        }
+    }
+
+    private fun moveToLibrary(staged: File, youtubeId: String?, jobId: String, ext: String): File {
+        val base = sanitize((youtubeId ?: "track") + "-" + jobId)
+        val dest = File(musicDir, "$base.$ext")
+        if (dest.exists()) dest.delete()
+        if (!staged.renameTo(dest)) {
+            staged.copyTo(dest, overwrite = true)
+            staged.delete()
+        }
+        if (!dest.exists()) error("Could not move download into library")
+        return dest
+    }
+
+    private fun isAudioFile(f: File): Boolean =
+        f.extension.lowercase() in audioExtensions
+
+    private fun isUnder(file: File, dir: File): Boolean {
+        val parent = dir.canonicalFile
+        var cur: File? = file.canonicalFile
+        while (cur != null) {
+            if (cur == parent) return true
+            cur = cur.parentFile
+        }
+        return false
     }
 
     private fun applyAudioFormat(request: YoutubeDLRequest, flac: Boolean, fallbackQuality: String) {

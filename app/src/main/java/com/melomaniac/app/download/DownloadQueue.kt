@@ -358,7 +358,13 @@ class DownloadQueue(
                     playlistId = meta.optString("playlistId").ifBlank { null },
                     path = result.file.absolutePath,
                     format = result.format,
-                    durationMs = if (meta.optLong("durationMs") > 0) meta.optLong("durationMs") else result.durationMs,
+                    // Prefer duration of the actual downloaded file (player source of truth).
+                    // Spotify meta can disagree when a race previously attached the wrong audio.
+                    durationMs = when {
+                        result.durationMs > 0 -> result.durationMs
+                        meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
+                        else -> 0L
+                    },
                     sourceUrl = url,
                     sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
                     spotifyId = meta.optString("spotifyId").ifBlank { null },
