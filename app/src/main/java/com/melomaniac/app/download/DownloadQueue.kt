@@ -5,6 +5,10 @@ import com.melomaniac.app.data.DownloadDao
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.LibraryRepository
 import com.melomaniac.app.data.SettingsRepository
+import com.melomaniac.app.data.TrackEntity
+import com.melomaniac.app.data.TrackSegmentEntity
+import com.melomaniac.app.telegram.HlsPackager
+import com.melomaniac.app.telegram.TelegramConfig
 import com.melomaniac.app.util.AppLog
 import com.melomaniac.app.util.newId
 import kotlinx.coroutines.CoroutineScope
@@ -17,6 +21,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.File
 
 class DownloadQueue(
     private val appContext: Context,
@@ -26,6 +31,8 @@ class DownloadQueue(
     private val ytDlp: YtDlpRunner,
     private val spotify: SpotifyScraper,
     private val covers: CoverStore,
+    private val hlsPackager: HlsPackager,
+    private val telegramConfig: TelegramConfig,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -73,7 +80,11 @@ class DownloadQueue(
     suspend fun enqueueFromUserInput(input: String): Pair<Int, String> = withContext(Dispatchers.IO) {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return@withContext 0 to "Entrada vacía"
-        AppLog.i("Queue", "enqueue input: ${trimmed.take(120)}")
+        val settings = settingsRepo.get()
+        if (!settings.isTelegramConfigured) {
+            return@withContext 0 to "Configurá Telegram en Ajustes antes de descargar"
+        }
+        AppLog.i("Queue", "enqueue input: ${trimmed.take(120)} → telegram")
 
         when {
             LinkDetector.isSpotify(trimmed) -> {
@@ -208,6 +219,10 @@ class DownloadQueue(
     }
 
     suspend fun enqueueYtHit(hit: YtHit): Pair<Int, String> = withContext(Dispatchers.IO) {
+        val settings = settingsRepo.get()
+        if (!settings.isTelegramConfigured) {
+            return@withContext 0 to "Configurá Telegram en Ajustes antes de descargar"
+        }
         enqueue(
             hit.url,
             meta {
@@ -220,6 +235,59 @@ class DownloadQueue(
         )
         start()
         1 to "Encolado: ${hit.title}"
+    }
+
+    /**
+     * Re-downloads an existing library track to local storage (offline).
+     * Does not upload to Telegram; attaches the file to [trackId].
+     */
+    suspend fun enqueueLocalDownload(trackId: String): Pair<Int, String> =
+        enqueueLocalDownloads(listOf(trackId))
+
+    suspend fun enqueueLocalDownloads(trackIds: List<String>): Pair<Int, String> = withContext(Dispatchers.IO) {
+        if (trackIds.isEmpty()) return@withContext 0 to "Nada para descargar"
+        var enqueued = 0
+        var skipped = 0
+        for (trackId in trackIds.distinct()) {
+            val track = library.getTrack(trackId) ?: continue
+            val existingPath = track.path
+            if (!existingPath.isNullOrBlank() && File(existingPath).exists() &&
+                track.storageMode == TrackEntity.STORAGE_LOCAL
+            ) {
+                skipped++
+                continue
+            }
+            val urlOrQuery = when {
+                !track.sourceUrl.isNullOrBlank() &&
+                    (LinkDetector.isYouTube(track.sourceUrl!!) || track.sourceUrl!!.startsWith("ytsearch")) ->
+                    track.sourceUrl!!
+                !track.youtubeId.isNullOrBlank() ->
+                    "https://www.youtube.com/watch?v=${track.youtubeId}"
+                else -> {
+                    val artist = track.artistId?.let { library.getArtist(it)?.name }.orEmpty()
+                    "${track.title} $artist".trim()
+                }
+            }
+            enqueue(
+                urlOrQuery = urlOrQuery,
+                metaJson = meta {
+                    put("targetStorage", "local")
+                    put("existingTrackId", track.id)
+                    put("title", track.title)
+                    track.youtubeId?.let { put("youtubeId", it) }
+                    track.spotifyId?.let { put("spotifyId", it) }
+                    if (track.durationMs > 0) put("durationMs", track.durationMs)
+                },
+            )
+            enqueued++
+        }
+        if (enqueued > 0) start()
+        when {
+            enqueued == 0 && skipped > 0 -> 0 to "Todos ya están locales"
+            enqueued == 0 -> 0 to "Nada para descargar"
+            enqueued == 1 -> 1 to "Descarga local encolada"
+            else -> enqueued to "$enqueued temas encolados para descarga local"
+        }
     }
 
     suspend fun retry(id: String) {
@@ -324,10 +392,11 @@ class DownloadQueue(
                 onProgress = { p ->
                     scope.launch {
                         commitIfCurrent(workerGeneration) {
+                            // 0–70% yt-dlp
                             downloadDao.update(
                                 job.id,
                                 "running",
-                                p.coerceAtMost(99f),
+                                (p * 0.70f).coerceAtMost(70f),
                                 null,
                                 System.currentTimeMillis(),
                             )
@@ -344,47 +413,172 @@ class DownloadQueue(
             val coverKey = meta.optString("spotifyId").ifBlank { null }
                 ?: youtubeId
                 ?: job.id
-            val committed = commitIfCurrent(workerGeneration) {
-                val coverFile = covers.obtain(
-                    key = coverKey,
-                    preferredUrl = meta.optString("coverUrl").ifBlank { null },
-                    youtubeId = youtubeId,
+            val existingTrackId = meta.optString("existingTrackId").ifBlank { null }
+            val targetLocal = meta.optString("targetStorage") == "local" && existingTrackId != null
+
+            if (!targetLocal && !settings.isTelegramConfigured) {
+                result.file.delete()
+                error("Configurá Telegram en Ajustes antes de descargar")
+            }
+
+            val coverFile = covers.obtain(
+                key = coverKey,
+                preferredUrl = meta.optString("coverUrl").ifBlank { null },
+                youtubeId = youtubeId,
+            )
+
+            if (targetLocal) {
+                processLocalAttach(
+                    job = job,
+                    workerGeneration = workerGeneration,
+                    result = result,
+                    existingTrackId = existingTrackId!!,
                 )
+            } else {
+                processOnline(
+                    job = job,
+                    workerGeneration = workerGeneration,
+                    result = result,
+                    meta = meta,
+                    url = url,
+                    youtubeId = youtubeId,
+                    coverPath = coverFile?.absolutePath,
+                )
+            }
+        } catch (e: Exception) {
+            AppLog.e("Queue", "failed job=${job.id}", e)
+            commitIfCurrent(workerGeneration) {
+                downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
+            }
+        }
+    }
+
+    private suspend fun processLocalAttach(
+        job: DownloadJobEntity,
+        workerGeneration: Long,
+        result: DownloadResult,
+        existingTrackId: String,
+    ) {
+        val existing = library.getTrack(existingTrackId)
+        val durationMs = when {
+            result.durationMs > 0 -> result.durationMs
+            (existing?.durationMs ?: 0L) > 0 -> existing!!.durationMs
+            else -> 0L
+        }
+        val oldPath = existing?.path
+        val committed = commitIfCurrent(workerGeneration) {
+            library.attachLocalFile(
+                trackId = existingTrackId,
+                path = result.file.absolutePath,
+                format = result.format,
+                durationMs = durationMs,
+            )
+            downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+        }
+        if (!committed) {
+            result.file.delete()
+            AppLog.i("Queue", "discarded stale local job=${job.id}")
+            return
+        }
+        if (!oldPath.isNullOrBlank() && oldPath != result.file.absolutePath) {
+            runCatching {
+                val f = File(oldPath)
+                if (f.exists()) f.delete()
+            }
+        }
+        AppLog.i("Queue", "local attach job=${job.id} → track=$existingTrackId ${result.file.name}")
+    }
+
+    private suspend fun processOnline(
+        job: DownloadJobEntity,
+        workerGeneration: Long,
+        result: DownloadResult,
+        meta: JSONObject,
+        url: String,
+        youtubeId: String?,
+        coverPath: String?,
+    ) {
+        val (client, chatId) = telegramConfig.requireClient()
+        commitIfCurrent(workerGeneration) {
+            downloadDao.update(job.id, "running", 72f, null, System.currentTimeMillis())
+        }
+        val packed = hlsPackager.packageAudio(result.file, job.id)
+        try {
+            if (workerGeneration != resetGeneration) {
+                result.file.delete()
+                packed.deleteQuietly()
+                AppLog.i("Queue", "discarded stale online job=${job.id}")
+                return
+            }
+            commitIfCurrent(workerGeneration) {
+                downloadDao.update(job.id, "running", 85f, null, System.currentTimeMillis())
+            }
+            val uploaded = mutableListOf<TrackSegmentEntity>()
+            val total = packed.segments.size.coerceAtLeast(1)
+            for (seg in packed.segments) {
+                if (workerGeneration != resetGeneration) {
+                    result.file.delete()
+                    packed.deleteQuietly()
+                    AppLog.i("Queue", "discarded stale online job=${job.id} mid-upload")
+                    return
+                }
+                val ref = client.sendDocument(
+                    chatId = chatId,
+                    file = seg.file,
+                    caption = "mm:${job.id}:${seg.index}",
+                    fileName = "seg_${seg.index.toString().padStart(5, '0')}.ts",
+                )
+                uploaded += TrackSegmentEntity(
+                    trackId = "",
+                    segmentIndex = seg.index,
+                    telegramFileId = ref.fileId,
+                    durationSec = seg.durationSec,
+                    byteSize = ref.fileSize ?: seg.file.length(),
+                )
+                val progress = 85f + (15f * (seg.index + 1) / total)
+                commitIfCurrent(workerGeneration) {
+                    downloadDao.update(
+                        job.id,
+                        "running",
+                        progress.coerceAtMost(99f),
+                        null,
+                        System.currentTimeMillis(),
+                    )
+                }
+            }
+            val committed = commitIfCurrent(workerGeneration) {
                 library.insertDownloadedTrack(
                     title = meta.optString("title").ifBlank { result.title },
                     artistName = meta.optString("artist").ifBlank { null } ?: result.artist,
                     albumName = meta.optString("albumName").ifBlank { null },
                     albumId = meta.optString("albumId").ifBlank { null },
                     playlistId = meta.optString("playlistId").ifBlank { null },
-                    path = result.file.absolutePath,
-                    format = result.format,
-                    // Prefer duration of the actual downloaded file (player source of truth).
-                    // Spotify meta can disagree when a race previously attached the wrong audio.
+                    path = null,
+                    format = "hls",
                     durationMs = when {
                         result.durationMs > 0 -> result.durationMs
                         meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
-                        else -> 0L
+                        else -> (uploaded.sumOf { it.durationSec } * 1000).toLong()
                     },
                     sourceUrl = url,
                     sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
                     spotifyId = meta.optString("spotifyId").ifBlank { null },
                     youtubeId = youtubeId,
                     genre = null,
-                    coverPath = coverFile?.absolutePath,
+                    coverPath = coverPath,
+                    storageMode = TrackEntity.STORAGE_TELEGRAM,
+                    segments = uploaded,
                 )
                 downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
             }
             if (!committed) {
-                result.file.delete()
-                AppLog.i("Queue", "discarded stale job=${job.id} during reset")
+                AppLog.i("Queue", "discarded stale online job=${job.id} at insert")
                 return
             }
-            AppLog.i("Queue", "done job=${job.id} → ${result.file.name}")
-        } catch (e: Exception) {
-            AppLog.e("Queue", "failed job=${job.id}", e)
-            commitIfCurrent(workerGeneration) {
-                downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
-            }
+            AppLog.i("Queue", "online job=${job.id} → ${uploaded.size} segments, local wiped")
+        } finally {
+            packed.deleteQuietly()
+            runCatching { result.file.delete() }
         }
     }
 

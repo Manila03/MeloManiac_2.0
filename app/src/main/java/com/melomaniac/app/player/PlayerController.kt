@@ -10,7 +10,10 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.melomaniac.app.data.LibraryRepository
+import com.melomaniac.app.data.TrackEntity
 import com.melomaniac.app.data.TrackRow
+import com.melomaniac.app.telegram.HlsProxyServer
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +41,7 @@ data class PlayerUiState(
 class PlayerController(
     private val context: Context,
     private val library: LibraryRepository,
+    private val hlsProxy: HlsProxyServer,
 ) {
     private val scope = CoroutineScope(Dispatchers.Main + Job())
     private var controllerFuture: ListenableFuture<MediaController>? = null
@@ -65,16 +69,26 @@ class PlayerController(
         controller?.removeListener(listener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         controller = null
+        hlsProxy.stop()
     }
 
     fun playTracks(tracks: List<TrackRow>, startIndex: Int = 0) {
         val c = controller ?: return
-        val items = tracks.map { it.toMediaItem() }
-        c.setMediaItems(items, startIndex, 0)
-        c.prepare()
-        c.play()
-        tracks.getOrNull(startIndex)?.let {
-            scope.launch { library.recordPlay(it.id) }
+        scope.launch {
+            if (tracks.any { !it.hasLocalFile }) {
+                try {
+                    hlsProxy.ensureStarted()
+                } catch (e: Exception) {
+                    AppLog.e(TAG, "HLS proxy failed to start", e)
+                }
+            }
+            val items = tracks.map { it.toMediaItem() }
+            c.setMediaItems(items, startIndex, 0)
+            c.prepare()
+            c.play()
+            tracks.getOrNull(startIndex)?.let {
+                library.recordPlay(it.id)
+            }
         }
     }
 
@@ -168,8 +182,16 @@ class PlayerController(
     }
 
     private fun TrackRow.toMediaItem(): MediaItem {
-        val uri = if (path.startsWith("file://") || path.startsWith("content://")) path else "file://$path"
-        val fileUri = if (File(path).exists()) android.net.Uri.fromFile(File(path)) else android.net.Uri.parse(uri)
+        val localPath = path?.takeIf { it.isNotBlank() }
+        val localFile = localPath?.let { File(it) }?.takeIf { it.exists() }
+        val playUri = when {
+            localFile != null -> android.net.Uri.fromFile(localFile)
+            localPath != null && (localPath.startsWith("file://") || localPath.startsWith("content://")) ->
+                android.net.Uri.parse(localPath)
+            else -> android.net.Uri.parse(hlsProxy.playlistUrl(id))
+        }
+        val useHls = localFile == null &&
+            (storageMode == TrackEntity.STORAGE_TELEGRAM || localPath.isNullOrBlank())
         val meta = MediaMetadata.Builder()
             .setTitle(title)
             .setArtist(artistName ?: "Unknown")
@@ -180,8 +202,15 @@ class PlayerController(
         }
         return MediaItem.Builder()
             .setMediaId(id)
-            .setUri(fileUri)
+            .setUri(playUri)
+            .apply {
+                if (useHls) setMimeType("application/x-mpegURL")
+            }
             .setMediaMetadata(meta.build())
             .build()
+    }
+
+    companion object {
+        private const val TAG = "Player"
     }
 }

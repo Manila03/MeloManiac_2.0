@@ -41,7 +41,7 @@ data class AlbumEntity(
         ForeignKey(entity = ArtistEntity::class, parentColumns = ["id"], childColumns = ["artistId"], onDelete = ForeignKey.SET_NULL),
         ForeignKey(entity = AlbumEntity::class, parentColumns = ["id"], childColumns = ["albumId"], onDelete = ForeignKey.SET_NULL),
     ],
-    indices = [Index("artistId"), Index("albumId"), Index("isFavorite"), Index("lastPlayedAt")],
+    indices = [Index("artistId"), Index("albumId"), Index("isFavorite"), Index("lastPlayedAt"), Index("storageMode")],
 )
 data class TrackEntity(
     @PrimaryKey val id: String,
@@ -49,7 +49,8 @@ data class TrackEntity(
     val artistId: String? = null,
     val albumId: String? = null,
     val durationMs: Long = 0,
-    val path: String,
+    /** Absolute local path when [storageMode] is local; null for telegram/online tracks. */
+    val path: String? = null,
     val format: String = "flac",
     val bitrate: Int? = null,
     val sourceUrl: String? = null,
@@ -58,9 +59,37 @@ data class TrackEntity(
     val youtubeId: String? = null,
     val genre: String? = null,
     val coverPath: String? = null,
+    /** "local" = file on device; "telegram" = HLS segments in Telegram channel. */
+    val storageMode: String = STORAGE_LOCAL,
     val isFavorite: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val lastPlayedAt: Long? = null,
+) {
+    companion object {
+        const val STORAGE_LOCAL = "local"
+        const val STORAGE_TELEGRAM = "telegram"
+    }
+}
+
+@Entity(
+    tableName = "track_segments",
+    primaryKeys = ["trackId", "segmentIndex"],
+    foreignKeys = [
+        ForeignKey(
+            entity = TrackEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["trackId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("trackId")],
+)
+data class TrackSegmentEntity(
+    val trackId: String,
+    val segmentIndex: Int,
+    val telegramFileId: String,
+    val durationSec: Double = 10.0,
+    val byteSize: Long? = null,
 )
 
 @Entity(tableName = "playlists")

@@ -1,21 +1,19 @@
 package com.melomaniac.app.ui
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Pause
@@ -31,15 +29,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -98,13 +94,15 @@ fun TrackList(
     onPlay: (List<TrackRow>, Int) -> Unit,
     onToggleFavorite: (String) -> Unit,
     onDelete: ((String) -> Unit)? = null,
+    onDownloadLocal: ((String) -> Unit)? = null,
 ) {
     if (tracks.isEmpty()) {
         Text("Sin temas", color = TextMuted, modifier = Modifier.padding(24.dp))
         return
     }
     var pendingDeleteId by remember { mutableStateOf<String?>(null) }
-    val pendingTitle = tracks.firstOrNull { it.id == pendingDeleteId }?.title
+    val pendingTrack = tracks.firstOrNull { it.id == pendingDeleteId }
+    val pendingTitle = pendingTrack?.title
 
     if (pendingDeleteId != null) {
         androidx.compose.material3.AlertDialog(
@@ -112,7 +110,12 @@ fun TrackList(
             title = { Text("Borrar canción") },
             text = {
                 Text(
-                    "¿Borrar \"${pendingTitle ?: "este tema"}\" del dispositivo y de la biblioteca?",
+                    if (pendingTrack?.hasLocalFile != true && pendingTrack?.isOnline == true) {
+                        "¿Borrar \"${pendingTitle ?: "este tema"}\" de la biblioteca? " +
+                            "(Los segmentos en Telegram no se eliminan del canal.)"
+                    } else {
+                        "¿Borrar \"${pendingTitle ?: "este tema"}\" del dispositivo y de la biblioteca?"
+                    },
                 )
             },
             confirmButton = {
@@ -134,24 +137,52 @@ fun TrackList(
                 colors = CardDefaults.cardColors(containerColor = Surface),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .clickable { onPlay(tracks, index) },
+                    .padding(vertical = 4.dp),
             ) {
                 Row(
                     Modifier.padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CoverArt(path = track.coverPath, size = 52.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            listOfNotNull(track.artistName, formatMs(track.durationMs)).joinToString(" · "),
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.bodySmall,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                    Row(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onPlay(tracks, index) },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CoverArt(path = track.coverPath, size = 52.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                track.title,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                listOfNotNull(
+                                    track.artistName,
+                                    formatMs(track.durationMs),
+                                    when {
+                                        track.hasLocalFile -> "Local"
+                                        track.isOnline -> "Online"
+                                        else -> null
+                                    },
+                                ).joinToString(" · "),
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    if (onDownloadLocal != null && track.needsLocalDownload) {
+                        IconButton(onClick = { onDownloadLocal(track.id) }) {
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = "Descargar localmente",
+                                tint = Accent,
+                            )
+                        }
                     }
                     IconButton(onClick = { onToggleFavorite(track.id) }) {
                         Icon(

@@ -4,7 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -60,7 +62,7 @@ fun LibraryHomeScreen(
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("MeloManiac")
-        Muted("Tu música. Offline. FLAC.")
+        Muted("Descargas a Telegram. Usá el icono de descarga para guardar offline.")
         PrimaryButton("Explorar biblioteca", onClick = onBrowse)
         Text(
             "Todas las canciones ($count)",
@@ -80,6 +82,12 @@ fun LibraryHomeScreen(
                             val orphan = container.library.deleteTrack(id)
                             container.covers.deleteIfExists(orphan)
                         }
+                    }
+                },
+                onDownloadLocal = { id ->
+                    scope.launch {
+                        val (_, msg) = container.downloadQueue.enqueueLocalDownload(id)
+                        AppLog.i("Library", msg)
                     }
                 },
             )
@@ -342,6 +350,48 @@ fun SettingsScreen(container: AppContainer) {
             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
             modifier = Modifier.padding(top = 8.dp),
         )
+
+        Text("Telegram (almacenamiento online)", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
+        Muted(
+            "Las descargas van a Telegram (HLS). Usá «Descargar localmente» en la biblioteca " +
+                "para guardar un tema o playlist offline en el teléfono. " +
+                "Creá un bot con @BotFather, un canal privado, agregá el bot como admin " +
+                "y pegá el token + channel ID (ej. -100…).",
+        )
+        Spacer(Modifier.height(8.dp))
+        AppTextField(
+            value = settings.telegramBotToken,
+            onValueChange = { save(settings.copy(telegramBotToken = it.trim())) },
+            placeholder = "Bot token",
+        )
+        Spacer(Modifier.height(8.dp))
+        AppTextField(
+            value = settings.telegramChannelId,
+            onValueChange = { save(settings.copy(telegramChannelId = it.trim())) },
+            placeholder = "Channel ID (ej. -100123…)",
+        )
+        Spacer(Modifier.height(8.dp))
+        PrimaryButton(
+            "Probar conexión Telegram",
+            onClick = {
+                scope.launch {
+                    try {
+                        AppBusy.run("Probando Telegram…") {
+                            status = container.telegramConfig.testConnection()
+                        }
+                    } catch (e: Exception) {
+                        status = e.message
+                    }
+                }
+            },
+            enabled = globalBusy == null &&
+                settings.telegramBotToken.isNotBlank() &&
+                settings.telegramChannelId.isNotBlank(),
+        )
+        if (settings.isTelegramConfigured) {
+            Muted("Telegram listo ✓")
+        }
+
         Text("Spotify", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
         Muted(
             "Spotify se resuelve por scraper público (sin API ni login). " +

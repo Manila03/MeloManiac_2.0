@@ -141,7 +141,14 @@ fun MeloApp(
 
     val backStack by nav.currentBackStackEntryAsState()
     val route = backStack?.destination?.route.orEmpty()
-    val showTabs = route in setOf("library", "search", "downloads", "logs", "settings")
+    val selectedTab = when {
+        route == "search" -> "search"
+        route == "downloads" -> "downloads"
+        route == "logs" -> "logs"
+        route == "settings" -> "settings"
+        // Biblioteca home + explorar + detalles (+ nowPlaying from library flow)
+        else -> "library"
+    }
     val busyMessage by AppBusy.message.collectAsState()
 
     fun play(tracks: List<TrackRow>, index: Int) {
@@ -163,36 +170,34 @@ fun MeloApp(
                         onOpen = { nav.navigate("nowPlaying") },
                     )
                 }
-                if (showTabs) {
-                    NavigationBar(containerColor = Background) {
-                        val items = listOf(
-                            Triple("library", "Biblioteca", Icons.Default.Home),
-                            Triple("search", "Buscar", Icons.Default.Search),
-                            Triple("downloads", "Descargas", Icons.Default.Download),
-                            Triple("logs", "Logs", Icons.Default.Terminal),
-                            Triple("settings", "Ajustes", Icons.Default.Settings),
+                NavigationBar(containerColor = Background) {
+                    val items = listOf(
+                        Triple("library", "Biblioteca", Icons.Default.Home),
+                        Triple("search", "Buscar", Icons.Default.Search),
+                        Triple("downloads", "Descargas", Icons.Default.Download),
+                        Triple("logs", "Logs", Icons.Default.Terminal),
+                        Triple("settings", "Ajustes", Icons.Default.Settings),
+                    )
+                    items.forEach { (r, label, icon) ->
+                        NavigationBarItem(
+                            selected = selectedTab == r,
+                            onClick = {
+                                nav.navigate(r) {
+                                    popUpTo("library") { saveState = true }
+                                    launchSingleTop = true
+                                    restoreState = true
+                                }
+                            },
+                            icon = { Icon(icon, label) },
+                            label = { Text(label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = Accent,
+                                selectedTextColor = Accent,
+                                indicatorColor = Accent.copy(alpha = 0.2f),
+                                unselectedIconColor = TextMuted,
+                                unselectedTextColor = TextMuted,
+                            ),
                         )
-                        items.forEach { (r, label, icon) ->
-                            NavigationBarItem(
-                                selected = route == r,
-                                onClick = {
-                                    nav.navigate(r) {
-                                        popUpTo("library") { saveState = true }
-                                        launchSingleTop = true
-                                        restoreState = true
-                                    }
-                                },
-                                icon = { Icon(icon, label) },
-                                label = { Text(label) },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = Accent,
-                                    selectedTextColor = Accent,
-                                    indicatorColor = Accent.copy(alpha = 0.2f),
-                                    unselectedIconColor = TextMuted,
-                                    unselectedTextColor = TextMuted,
-                                ),
-                            )
-                        }
                     }
                 }
             }

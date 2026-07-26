@@ -1,7 +1,9 @@
 package com.melomaniac.app.ui.screens
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,11 +20,14 @@ import androidx.compose.ui.unit.dp
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.TrackRow
 import com.melomaniac.app.ui.AppTextField
+import com.melomaniac.app.ui.Muted
 import com.melomaniac.app.ui.PrimaryButton
 import com.melomaniac.app.ui.ScreenTitle
 import com.melomaniac.app.ui.SimpleListItem
 import com.melomaniac.app.ui.TrackList
+import com.melomaniac.app.ui.theme.Accent
 import com.melomaniac.app.util.AppBusy
+import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -43,6 +48,12 @@ private fun LibraryTrackList(
                     val orphan = container.library.deleteTrack(id)
                     container.covers.deleteIfExists(orphan)
                 }
+            }
+        },
+        onDownloadLocal = { id ->
+            scope.launch {
+                val (_, msg) = container.downloadQueue.enqueueLocalDownload(id)
+                AppLog.i("Library", msg)
             }
         },
     )
@@ -187,12 +198,32 @@ fun AlbumDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRo
 fun PlaylistDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRow>, Int) -> Unit) {
     val tracks by container.library.observeTracksByPlaylist(id).collectAsState(initial = emptyList())
     var title by remember { mutableStateOf("Playlist") }
+    var status by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     androidx.compose.runtime.LaunchedEffect(id) {
         title = container.library.getPlaylist(id)?.name ?: "Playlist"
     }
+    val needsLocal = tracks.filter { it.needsLocalDownload }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
+        if (needsLocal.isNotEmpty()) {
+            PrimaryButton("Descargar playlist localmente (${needsLocal.size})") {
+                scope.launch {
+                    val (_, msg) = container.downloadQueue.enqueueLocalDownloads(
+                        needsLocal.map { it.id },
+                    )
+                    status = msg
+                    AppLog.i("Library", msg)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        } else if (tracks.isNotEmpty()) {
+            Muted("Todos los temas ya están locales.")
+            Spacer(Modifier.height(8.dp))
+        }
+        status?.let {
+            Text(it, color = Accent, modifier = Modifier.padding(bottom = 8.dp))
+        }
         LibraryTrackList(container, tracks, onPlay, scope)
     }
 }

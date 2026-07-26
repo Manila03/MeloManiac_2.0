@@ -59,7 +59,7 @@ class LibraryRepository(private val dao: LibraryDao) {
         albumName: String?,
         albumId: String?,
         playlistId: String?,
-        path: String,
+        path: String?,
         format: String,
         durationMs: Long,
         sourceUrl: String?,
@@ -68,6 +68,8 @@ class LibraryRepository(private val dao: LibraryDao) {
         youtubeId: String?,
         genre: String?,
         coverPath: String? = null,
+        storageMode: String = TrackEntity.STORAGE_LOCAL,
+        segments: List<TrackSegmentEntity> = emptyList(),
     ): TrackEntity {
         val artist = getOrCreateArtist(artistName ?: "Unknown Artist")
         val resolvedAlbumId = albumId
@@ -87,8 +89,12 @@ class LibraryRepository(private val dao: LibraryDao) {
             youtubeId = youtubeId,
             genre = genre,
             coverPath = coverPath,
+            storageMode = storageMode,
         )
         dao.upsertTrack(track)
+        if (segments.isNotEmpty()) {
+            dao.upsertSegments(segments.map { it.copy(trackId = track.id) })
+        }
         if (!coverPath.isNullOrBlank()) {
             dao.setAlbumCoverIfEmpty(resolvedAlbumId, coverPath)
             if (playlistId != null) dao.setPlaylistCoverIfEmpty(playlistId, coverPath)
@@ -101,9 +107,16 @@ class LibraryRepository(private val dao: LibraryDao) {
         return track
     }
 
+    suspend fun getSegments(trackId: String): List<TrackSegmentEntity> = dao.getSegments(trackId)
+
+    /** Attaches a local audio file to an existing library track (offline download). */
+    suspend fun attachLocalFile(trackId: String, path: String, format: String, durationMs: Long) {
+        dao.attachLocalFile(trackId, path, format, durationMs, TrackEntity.STORAGE_LOCAL)
+    }
+
     suspend fun toggleFavorite(id: String) = dao.toggleFavorite(id)
 
-    /** Deletes DB rows and the audio file on disk. */
+    /** Deletes DB rows and the local audio file when present. Segments cascade. */
     suspend fun deleteTrack(id: String): String? {
         val track = dao.getTrack(id) ?: return null
         val cover = track.coverPath
@@ -111,12 +124,14 @@ class LibraryRepository(private val dao: LibraryDao) {
         dao.deleteGenreLinks(id)
         dao.deleteFolderLinks(id)
         dao.deletePlayHistory(id)
+        dao.deleteSegments(id)
         dao.deleteTrackRow(id)
-        runCatching {
-            val file = java.io.File(track.path)
-            if (file.exists()) file.delete()
+        track.path?.let { path ->
+            runCatching {
+                val file = java.io.File(path)
+                if (file.exists()) file.delete()
+            }
         }
-        // Return cover path if orphaned so caller can delete the file.
         if (!cover.isNullOrBlank()) {
             val stillUsed = dao.countTracksWithCover(cover) + dao.countAlbumsWithCover(cover)
             if (stillUsed == 0) return cover
@@ -135,15 +150,23 @@ class LibraryRepository(private val dao: LibraryDao) {
     suspend fun getPlaylist(id: String) = dao.getPlaylist(id)
     suspend fun getGenre(id: String) = dao.getGenre(id)
     suspend fun getFolder(id: String) = dao.getFolder(id)
+    suspend fun getTrack(id: String) = dao.getTrack(id)
 }
 
 data class AppSettings(
     val fallbackQuality: String = "best",
     val downloadConcurrency: Int = 2,
     val preferFlac: Boolean = true,
+    /** @deprecated Habitual downloads always go to Telegram; kept for settings migration. */
+    val storageMode: String = TrackEntity.STORAGE_TELEGRAM,
+    val telegramBotToken: String = "",
+    val telegramChannelId: String = "",
     val spotifyClientId: String = "",
     val spotifyClientSecret: String = "",
-)
+) {
+    val isTelegramConfigured: Boolean
+        get() = telegramBotToken.isNotBlank() && telegramChannelId.isNotBlank()
+}
 
 class SettingsRepository(private val dao: SettingsDao) {
     suspend fun get(): AppSettings {
@@ -152,6 +175,9 @@ class SettingsRepository(private val dao: SettingsDao) {
             fallbackQuality = map["fallbackQuality"] ?: "best",
             downloadConcurrency = map["downloadConcurrency"]?.toIntOrNull() ?: 2,
             preferFlac = map["preferFlac"]?.toBooleanStrictOrNull() ?: true,
+            storageMode = map["storageMode"] ?: TrackEntity.STORAGE_TELEGRAM,
+            telegramBotToken = map["telegramBotToken"].orEmpty(),
+            telegramChannelId = map["telegramChannelId"].orEmpty(),
             spotifyClientId = map["spotifyClientId"].orEmpty(),
             spotifyClientSecret = map["spotifyClientSecret"].orEmpty(),
         )
@@ -163,6 +189,9 @@ class SettingsRepository(private val dao: SettingsDao) {
         set("fallbackQuality", patch.fallbackQuality)
         set("downloadConcurrency", patch.downloadConcurrency.toString())
         set("preferFlac", patch.preferFlac.toString())
+        set("storageMode", TrackEntity.STORAGE_TELEGRAM)
+        set("telegramBotToken", patch.telegramBotToken)
+        set("telegramChannelId", patch.telegramChannelId)
         set("spotifyClientId", patch.spotifyClientId)
         set("spotifyClientSecret", patch.spotifyClientSecret)
     }

@@ -20,6 +20,15 @@ interface LibraryDao {
     suspend fun upsertTrack(track: TrackEntity)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSegments(segments: List<TrackSegmentEntity>)
+
+    @Query("SELECT * FROM track_segments WHERE trackId = :trackId ORDER BY segmentIndex ASC")
+    suspend fun getSegments(trackId: String): List<TrackSegmentEntity>
+
+    @Query("DELETE FROM track_segments WHERE trackId = :trackId")
+    suspend fun deleteSegments(trackId: String)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertPlaylist(playlist: PlaylistEntity)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -230,6 +239,20 @@ interface LibraryDao {
     @Query("UPDATE tracks SET lastPlayedAt = :at WHERE id = :id")
     suspend fun setLastPlayed(id: String, at: Long)
 
+    @Query(
+        """
+        UPDATE tracks SET path = :path, format = :format, durationMs = :durationMs,
+        storageMode = :storageMode WHERE id = :id
+        """,
+    )
+    suspend fun attachLocalFile(
+        id: String,
+        path: String,
+        format: String,
+        durationMs: Long,
+        storageMode: String,
+    )
+
     @Query("SELECT MAX(position) FROM playlist_tracks WHERE playlistId = :playlistId")
     suspend fun maxPlaylistPosition(playlistId: String): Int?
 }
@@ -245,6 +268,12 @@ data class TrackRow(
     val path get() = track.path
     val durationMs get() = track.durationMs
     val isFavorite get() = track.isFavorite
+    val storageMode get() = track.storageMode
+    val isOnline get() = track.storageMode == TrackEntity.STORAGE_TELEGRAM
+    val hasLocalFile: Boolean
+        get() = !path.isNullOrBlank() && java.io.File(path!!).exists()
+    /** Needs the "download locally" action. */
+    val needsLocalDownload: Boolean get() = !hasLocalFile
 }
 
 data class AlbumRow(

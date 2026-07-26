@@ -7,6 +7,9 @@ import com.melomaniac.app.download.DownloadQueue
 import com.melomaniac.app.download.SpotifyScraper
 import com.melomaniac.app.download.YtDlpRunner
 import com.melomaniac.app.player.PlayerController
+import com.melomaniac.app.telegram.HlsPackager
+import com.melomaniac.app.telegram.HlsProxyServer
+import com.melomaniac.app.telegram.TelegramConfig
 import com.melomaniac.app.update.AppUpdater
 import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
@@ -25,9 +28,14 @@ class AppContainer(context: Context) {
     val appUpdater = AppUpdater(appContext)
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
     private val coversDir = File(appContext.filesDir, "covers").also { if (!it.exists()) it.mkdirs() }
+    private val hlsStagingDir = File(appContext.cacheDir, "hls-staging").also { if (!it.exists()) it.mkdirs() }
+
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
     val spotify = SpotifyScraper(appContext)
     val covers = CoverStore(appContext)
+    val telegramConfig = TelegramConfig(settings)
+    val hlsPackager = HlsPackager(appContext, binaryManager, hlsStagingDir)
+    val hlsProxy = HlsProxyServer(library, settings)
 
     val downloadQueue = DownloadQueue(
         appContext = appContext,
@@ -37,9 +45,11 @@ class AppContainer(context: Context) {
         ytDlp = ytDlp,
         spotify = spotify,
         covers = covers,
+        hlsPackager = hlsPackager,
+        telegramConfig = telegramConfig,
     )
 
-    val player = PlayerController(appContext, library)
+    val player = PlayerController(appContext, library, hlsProxy)
 
     init {
         downloadQueue.start()
@@ -58,8 +68,10 @@ class AppContainer(context: Context) {
             db.clearAllTables()
             wipeDir(musicDir)
             wipeDir(coversDir)
+            wipeDir(hlsStagingDir)
             musicDir.mkdirs()
             coversDir.mkdirs()
+            hlsStagingDir.mkdirs()
         }
         AppLog.i(TAG, "resetLibrary: done")
     }
