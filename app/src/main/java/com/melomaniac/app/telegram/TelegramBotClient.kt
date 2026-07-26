@@ -2,6 +2,7 @@ package com.melomaniac.app.telegram
 
 import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -24,8 +25,14 @@ data class TelegramBotInfo(
     val firstName: String?,
 )
 
+class TelegramRateLimitException(
+    val retryAfterSec: Int,
+    message: String,
+) : Exception(message)
+
 /**
  * Thin Bot API client (OkHttp). Stores blobs in a private channel the bot administers.
+ * Retries automatically on HTTP 429 using Telegram's `retry_after`.
  */
 class TelegramBotClient(
     private val token: String,
@@ -101,7 +108,7 @@ class TelegramBotClient(
         }
     }
 
-    private fun apiGet(method: String, vararg params: Pair<String, String>): JSONObject {
+    private suspend fun apiGet(method: String, vararg params: Pair<String, String>): JSONObject {
         val url = StringBuilder("$baseUrl/$method")
         if (params.isNotEmpty()) {
             url.append('?')
@@ -113,26 +120,59 @@ class TelegramBotClient(
             }
         }
         val req = Request.Builder().url(url.toString()).get().build()
-        return parseResponse(req)
+        return executeWithRetry(req)
     }
 
-    private fun apiPost(method: String, body: MultipartBody): JSONObject {
+    private suspend fun apiPost(method: String, body: MultipartBody): JSONObject {
         val req = Request.Builder()
             .url("$baseUrl/$method")
             .post(body)
             .build()
-        return parseResponse(req)
+        return executeWithRetry(req)
+    }
+
+    private suspend fun executeWithRetry(req: Request): JSONObject {
+        var attempt = 0
+        while (true) {
+            try {
+                return parseResponse(req)
+            } catch (e: TelegramRateLimitException) {
+                attempt++
+                if (attempt > MAX_RATE_LIMIT_RETRIES) throw e
+                val waitSec = e.retryAfterSec.coerceIn(1, 120) + 1
+                AppLog.w(TAG, "429 rate limit — waiting ${waitSec}s (attempt $attempt/$MAX_RATE_LIMIT_RETRIES)")
+                delay(waitSec * 1000L)
+            }
+        }
     }
 
     private fun parseResponse(req: Request): JSONObject {
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
+            if (resp.code == 429 || text.contains("\"error_code\":429")) {
+                val retryAfter = parseRetryAfter(text) ?: 15
+                AppLog.w(TAG, "HTTP 429 retry_after=$retryAfter: ${text.take(200)}")
+                throw TelegramRateLimitException(
+                    retryAfterSec = retryAfter,
+                    message = "Telegram rate limit (retry after ${retryAfter}s)",
+                )
+            }
             if (!resp.isSuccessful) {
                 AppLog.e(TAG, "HTTP ${resp.code}: ${text.take(400)}")
                 error("Telegram HTTP ${resp.code}: ${text.take(200)}")
             }
             val json = JSONObject(text)
             if (!json.optBoolean("ok", false)) {
+                val code = json.optInt("error_code", 0)
+                if (code == 429) {
+                    val retryAfter = json.optJSONObject("parameters")?.optInt("retry_after")
+                        ?: parseRetryAfter(text)
+                        ?: 15
+                    throw TelegramRateLimitException(
+                        retryAfterSec = retryAfter,
+                        message = json.optString("description", "Too Many Requests"),
+                    )
+                }
                 val desc = json.optString("description", "unknown error")
                 AppLog.e(TAG, "API error: $desc")
                 error("Telegram: $desc")
@@ -143,6 +183,7 @@ class TelegramBotClient(
 
     companion object {
         private const val TAG = "TelegramBot"
+        private const val MAX_RATE_LIMIT_RETRIES = 8
 
         fun defaultClient(): OkHttpClient =
             OkHttpClient.Builder()
@@ -153,5 +194,17 @@ class TelegramBotClient(
 
         fun fromToken(token: String): TelegramBotClient =
             TelegramBotClient(token.trim())
+
+        private fun parseRetryAfter(body: String): Int? {
+            return try {
+                val json = JSONObject(body)
+                json.optJSONObject("parameters")?.optInt("retry_after")?.takeIf { it > 0 }
+                    ?: Regex("retry after (\\d+)", RegexOption.IGNORE_CASE)
+                        .find(body)?.groupValues?.get(1)?.toIntOrNull()
+            } catch (_: Exception) {
+                Regex("retry after (\\d+)", RegexOption.IGNORE_CASE)
+                    .find(body)?.groupValues?.get(1)?.toIntOrNull()
+            }
+        }
     }
 }

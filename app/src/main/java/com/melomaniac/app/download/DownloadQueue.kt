@@ -14,6 +14,7 @@ import com.melomaniac.app.util.newId
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -554,6 +555,10 @@ class DownloadQueue(
                         System.currentTimeMillis(),
                     )
                 }
+                // Pace uploads to reduce Telegram flood waits (still retries on 429).
+                if (seg.index + 1 < total) {
+                    delay(UPLOAD_GAP_MS)
+                }
             }
             val trackFormat = if (packed.progressive) result.format else "hls"
             val committed = commitIfCurrent(workerGeneration) {
@@ -603,5 +608,10 @@ class DownloadQueue(
         if (workerGeneration != resetGeneration) return@withLock false
         block()
         true
+    }
+
+    companion object {
+        /** Pause between Telegram segment uploads to reduce flood control. */
+        private const val UPLOAD_GAP_MS = 400L
     }
 }
