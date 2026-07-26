@@ -188,10 +188,10 @@ class PlayerController(
             localFile != null -> android.net.Uri.fromFile(localFile)
             localPath != null && (localPath.startsWith("file://") || localPath.startsWith("content://")) ->
                 android.net.Uri.parse(localPath)
-            else -> android.net.Uri.parse(hlsProxy.playlistUrl(id))
+            isHls -> android.net.Uri.parse(hlsProxy.playlistUrl(id))
+            else -> android.net.Uri.parse(hlsProxy.progressiveUrl(id))
         }
-        val useHls = localFile == null &&
-            (storageMode == TrackEntity.STORAGE_TELEGRAM || localPath.isNullOrBlank())
+        val useHls = localFile == null && isHls
         val meta = MediaMetadata.Builder()
             .setTitle(title)
             .setArtist(artistName ?: "Unknown")

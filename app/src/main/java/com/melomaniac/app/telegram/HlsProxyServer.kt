@@ -44,6 +44,9 @@ class HlsProxyServer(
 
     fun playlistUrl(trackId: String): String = "${baseUrl()}/hls/$trackId/index.m3u8"
 
+    /** Progressive (non-HLS) audio stored as a single Telegram document. */
+    fun progressiveUrl(trackId: String): String = "${baseUrl()}/file/$trackId"
+
     suspend fun ensureStarted() {
         if (running.get()) return
         startMutex.withLock {
@@ -105,6 +108,10 @@ class HlsProxyServer(
                         val m = SEGMENT_RE.matchEntire(path)!!
                         serveSegment(s, m.groupValues[1], m.groupValues[2].toInt())
                     }
+                    path.matches(FILE_RE) -> {
+                        val trackId = FILE_RE.matchEntire(path)!!.groupValues[1]
+                        serveProgressive(s, trackId)
+                    }
                     else -> writeResponse(s, 404, "text/plain", "Not Found")
                 }
             } catch (e: Exception) {
@@ -126,6 +133,24 @@ class HlsProxyServer(
             fetchSegmentBytes(trackId, index)
         }
         writeBytes(socket, 200, "video/mp2t", bytes)
+    }
+
+    private fun serveProgressive(socket: Socket, trackId: String) {
+        val (bytes, mime) = kotlinx.coroutines.runBlocking {
+            val track = library.getTrack(trackId)
+            val mime = mimeForFormat(track?.format)
+            fetchSegmentBytes(trackId, 0) to mime
+        }
+        writeBytes(socket, 200, mime, bytes)
+    }
+
+    private fun mimeForFormat(format: String?): String = when (format?.lowercase()) {
+        "flac" -> "audio/flac"
+        "mp3" -> "audio/mpeg"
+        "m4a", "aac" -> "audio/mp4"
+        "opus", "ogg" -> "audio/ogg"
+        "wav" -> "audio/wav"
+        else -> "application/octet-stream"
     }
 
     private suspend fun buildPlaylist(trackId: String): String = withContext(Dispatchers.IO) {
@@ -198,5 +223,6 @@ class HlsProxyServer(
         private const val PATH_TTL_MS = 50L * 60L * 1000L // 50 min
         private val PLAYLIST_RE = Regex("^/hls/([^/]+)/index\\.m3u8$")
         private val SEGMENT_RE = Regex("^/hls/([^/]+)/seg/(\\d+)$")
+        private val FILE_RE = Regex("^/file/([^/]+)$")
     }
 }

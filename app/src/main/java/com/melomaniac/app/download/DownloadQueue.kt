@@ -502,7 +502,15 @@ class DownloadQueue(
         commitIfCurrent(workerGeneration) {
             downloadDao.update(job.id, "running", 72f, null, System.currentTimeMillis())
         }
-        val packed = hlsPackager.packageAudio(result.file, job.id)
+        val packed = hlsPackager.packageAudio(
+            input = result.file,
+            jobId = job.id,
+            durationMsHint = when {
+                result.durationMs > 0 -> result.durationMs
+                meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
+                else -> 0L
+            },
+        )
         try {
             if (workerGeneration != resetGeneration) {
                 result.file.delete()
@@ -522,11 +530,12 @@ class DownloadQueue(
                     AppLog.i("Queue", "discarded stale online job=${job.id} mid-upload")
                     return
                 }
+                val ext = seg.file.extension.ifBlank { if (packed.progressive) result.format else "ts" }
                 val ref = client.sendDocument(
                     chatId = chatId,
                     file = seg.file,
                     caption = "mm:${job.id}:${seg.index}",
-                    fileName = "seg_${seg.index.toString().padStart(5, '0')}.ts",
+                    fileName = "seg_${seg.index.toString().padStart(5, '0')}.$ext",
                 )
                 uploaded += TrackSegmentEntity(
                     trackId = "",
@@ -546,6 +555,7 @@ class DownloadQueue(
                     )
                 }
             }
+            val trackFormat = if (packed.progressive) result.format else "hls"
             val committed = commitIfCurrent(workerGeneration) {
                 library.insertDownloadedTrack(
                     title = meta.optString("title").ifBlank { result.title },
@@ -554,7 +564,7 @@ class DownloadQueue(
                     albumId = meta.optString("albumId").ifBlank { null },
                     playlistId = meta.optString("playlistId").ifBlank { null },
                     path = null,
-                    format = "hls",
+                    format = trackFormat,
                     durationMs = when {
                         result.durationMs > 0 -> result.durationMs
                         meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
@@ -575,7 +585,11 @@ class DownloadQueue(
                 AppLog.i("Queue", "discarded stale online job=${job.id} at insert")
                 return
             }
-            AppLog.i("Queue", "online job=${job.id} → ${uploaded.size} segments, local wiped")
+            AppLog.i(
+                "Queue",
+                "online job=${job.id} → ${uploaded.size} file(s) " +
+                    "(${if (packed.progressive) "progressive" else "hls"}), local wiped",
+            )
         } finally {
             packed.deleteQuietly()
             runCatching { result.file.delete() }

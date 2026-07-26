@@ -269,7 +269,9 @@ data class TrackRow(
     val durationMs get() = track.durationMs
     val isFavorite get() = track.isFavorite
     val storageMode get() = track.storageMode
+    val format get() = track.format
     val isOnline get() = track.storageMode == TrackEntity.STORAGE_TELEGRAM
+    val isHls get() = format.equals("hls", ignoreCase = true)
     val hasLocalFile: Boolean
         get() = !path.isNullOrBlank() && java.io.File(path!!).exists()
     /** Needs the "download locally" action. */
