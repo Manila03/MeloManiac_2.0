@@ -46,7 +46,7 @@ class HlsPackager(
         input: File,
         jobId: String,
         durationMsHint: Long = 0L,
-        segmentSeconds: Int = 10,
+        segmentSeconds: Int = 45,
         audioBitrateK: Int = 256,
     ): HlsPackage = withContext(Dispatchers.IO) {
         require(input.exists()) { "Audio missing: ${input.absolutePath}" }

@@ -385,10 +385,15 @@ class DownloadQueue(
                     meta.put("coverUrl", best.thumbnailUrl)
                 }
             }
+            // Telegram/online path always uses m4a (YouTube isn't lossless; HLS re-encodes to AAC anyway).
+            // Local attach still honors the FLAC setting.
+            val existingTrackId = meta.optString("existingTrackId").ifBlank { null }
+            val targetLocal = meta.optString("targetStorage") == "local" && existingTrackId != null
+            val preferFlac = if (targetLocal) settings.preferFlac else false
             val result = ytDlp.downloadAudio(
                 urlOrQuery = url,
                 jobId = job.id,
-                preferFlac = settings.preferFlac,
+                preferFlac = preferFlac,
                 fallbackQuality = settings.fallbackQuality,
                 onProgress = { p ->
                     scope.launch {
@@ -414,8 +419,6 @@ class DownloadQueue(
             val coverKey = meta.optString("spotifyId").ifBlank { null }
                 ?: youtubeId
                 ?: job.id
-            val existingTrackId = meta.optString("existingTrackId").ifBlank { null }
-            val targetLocal = meta.optString("targetStorage") == "local" && existingTrackId != null
 
             if (!targetLocal && !settings.isTelegramConfigured) {
                 result.file.delete()
@@ -511,6 +514,7 @@ class DownloadQueue(
                 meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
                 else -> 0L
             },
+            segmentSeconds = 45,
         )
         try {
             if (workerGeneration != resetGeneration) {
