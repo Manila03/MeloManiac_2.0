@@ -312,6 +312,9 @@ interface DownloadDao {
     @Query("DELETE FROM download_jobs WHERE status IN ('done','failed','cancelled')")
     suspend fun clearHistory()
 
+    @Query("DELETE FROM download_jobs WHERE status IN ('queued','running')")
+    suspend fun clearActive()
+
     @Query("DELETE FROM download_jobs WHERE status != 'running'")
     suspend fun clearAllExceptRunning()
 

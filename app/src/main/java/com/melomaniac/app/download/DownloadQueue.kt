@@ -42,24 +42,58 @@ class DownloadQueue(
     private var running = false
     @Volatile private var resetGeneration = 0L
     private val inFlight = mutableSetOf<String>()
+    private val prefs by lazy {
+        appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
-    private val _status = MutableStateFlow("En espera")
+    private val _status = MutableStateFlow(
+        if (prefs.getBoolean(PREF_QUEUE_PAUSED, false)) "Pausado" else "En espera",
+    )
     val status: StateFlow<String> = _status
 
+    fun isPaused(): Boolean = prefs.getBoolean(PREF_QUEUE_PAUSED, false)
+
     fun start() {
+        setPaused(false)
         running = true
+        _status.value = "Procesando…"
         scope.launch {
             downloadDao.resetStuck(System.currentTimeMillis())
             pump()
         }
     }
 
-    fun stop() {
-        running = false
-        _status.value = "Pausado"
-        AppLog.i("Queue", "Pausado")
-        ytDlp.destroyAll()
-        DownloadService.stop(appContext)
+    suspend fun stop() {
+        mutex.withLock {
+            running = false
+            resetGeneration++
+            setPaused(true)
+            _status.value = "Pausado"
+            AppLog.i("Queue", "Pausado generation=$resetGeneration")
+            ytDlp.destroyAll()
+            DownloadService.stop(appContext)
+        }
+        // Re-queue interrupted jobs so pause does not leave them failed/stuck.
+        downloadDao.resetStuck(System.currentTimeMillis())
+    }
+
+    /**
+     * Aborts in-flight work and deletes all queued/running jobs.
+     * Finished history (done/failed/cancelled) is left for [clearHistory].
+     */
+    suspend fun clearQueue() {
+        mutex.withLock {
+            running = false
+            resetGeneration++
+            setPaused(true)
+            _status.value = "Pausado"
+            AppLog.i("Queue", "Vaciar cola generation=$resetGeneration")
+            ytDlp.destroyAll()
+            DownloadService.stop(appContext)
+        }
+        commitMutex.withLock {
+            downloadDao.clearActive()
+        }
     }
 
     /**
@@ -70,12 +104,17 @@ class DownloadQueue(
         mutex.withLock {
             running = false
             resetGeneration++
+            setPaused(false)
             _status.value = "En espera"
             AppLog.i("Queue", "Reset generation=$resetGeneration")
             ytDlp.destroyAll()
             DownloadService.stop(appContext)
         }
         commitMutex.withLock { wipe() }
+    }
+
+    private fun setPaused(paused: Boolean) {
+        prefs.edit().putBoolean(PREF_QUEUE_PAUSED, paused).apply()
     }
 
     suspend fun enqueueFromUserInput(input: String): Pair<Int, String> = withContext(Dispatchers.IO) {
@@ -146,10 +185,11 @@ class DownloadQueue(
                 if (listId != null && LinkDetector.isYouTubePlaylistUrl(trimmed)) {
                     val url = "https://www.youtube.com/playlist?list=$listId"
                     AppLog.i("Queue", "YouTube playlist list=$listId")
-                    val hits = ytDlp.listPlaylist(url)
-                    if (hits.isEmpty()) error("No se pudieron listar temas de la playlist")
-                    val playlist = library.createPlaylist("YouTube Playlist", url)
-                    hits.forEach { h ->
+                    val listing = ytDlp.listPlaylist(url)
+                    if (listing.entries.isEmpty()) error("No se pudieron listar temas de la playlist")
+                    val playlistName = listing.title?.takeIf { it.isNotBlank() } ?: "YouTube Playlist"
+                    val playlist = library.createPlaylist(playlistName, url)
+                    listing.entries.forEach { h ->
                         enqueue(
                             h.url,
                             meta {
@@ -163,7 +203,8 @@ class DownloadQueue(
                         )
                     }
                     start()
-                    return@withContext hits.size to "Playlist de YouTube: ${hits.size} temas"
+                    return@withContext listing.entries.size to
+                        "Playlist de YouTube \"$playlistName\": ${listing.entries.size} temas"
                 }
                 val vid = LinkDetector.youtubeVideoId(trimmed)
                 val url = if (vid != null) "https://www.youtube.com/watch?v=$vid" else trimmed
@@ -617,5 +658,7 @@ class DownloadQueue(
     companion object {
         /** Pause between Telegram segment uploads to reduce flood control. */
         private const val UPLOAD_GAP_MS = 400L
+        private const val PREFS_NAME = "melomaniac_downloads"
+        private const val PREF_QUEUE_PAUSED = "queue_paused"
     }
 }

@@ -52,7 +52,9 @@ class AppContainer(context: Context) {
     val player = PlayerController(appContext, library, hlsProxy)
 
     init {
-        downloadQueue.start()
+        if (!downloadQueue.isPaused()) {
+            downloadQueue.start()
+        }
     }
 
     /**

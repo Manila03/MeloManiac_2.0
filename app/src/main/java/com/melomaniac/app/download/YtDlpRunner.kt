@@ -20,6 +20,11 @@ data class YtHit(
     val thumbnailUrl: String? = null,
 )
 
+data class YtPlaylistListing(
+    val title: String?,
+    val entries: List<YtHit>,
+)
+
 data class DownloadResult(
     val file: File,
     val format: String,
@@ -67,7 +72,7 @@ class YtDlpRunner(
         hits
     }
 
-    suspend fun listPlaylist(url: String): List<YtHit> = withContext(Dispatchers.IO) {
+    suspend fun listPlaylist(url: String): YtPlaylistListing = withContext(Dispatchers.IO) {
         val clean = normalizePlaylistUrl(url)
         AppLog.i("yt-dlp", "list playlist: $clean")
         binaryManager.ensureBinaries()
@@ -82,8 +87,8 @@ class YtDlpRunner(
             request.addOption("--ignore-no-formats-error")
             parsePlaylistDumpJson(execute(request, "playlist-json").out)
         }.onFailure { AppLog.w("yt-dlp", "playlist -J failed", it) }.getOrNull()
-        if (!fromJson.isNullOrEmpty()) {
-            AppLog.i("yt-dlp", "playlist → ${fromJson.size} items (json)")
+        if (fromJson != null && fromJson.entries.isNotEmpty()) {
+            AppLog.i("yt-dlp", "playlist → ${fromJson.entries.size} items (json) title=${fromJson.title}")
             return@withContext fromJson
         }
 
@@ -91,13 +96,16 @@ class YtDlpRunner(
             val request = YoutubeDLRequest(clean)
             request.addOption("--flat-playlist")
             request.addOption("--yes-playlist")
-            request.addOption("--print", "%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s")
+            request.addOption(
+                "--print",
+                "%(playlist_title)s\t%(id)s\t%(title)s\t%(uploader)s\t%(duration)s\t%(thumbnail)s",
+            )
             request.addOption("--no-warnings")
             request.addOption("--ignore-no-formats-error")
-            parseTsvHits(execute(request, "playlist-print").out)
+            parsePlaylistTsv(execute(request, "playlist-print").out)
         }.onFailure { AppLog.w("yt-dlp", "playlist --print failed", it) }.getOrNull()
-        if (!fromPrint.isNullOrEmpty()) {
-            AppLog.i("yt-dlp", "playlist → ${fromPrint.size} items (print)")
+        if (fromPrint != null && fromPrint.entries.isNotEmpty()) {
+            AppLog.i("yt-dlp", "playlist → ${fromPrint.entries.size} items (print) title=${fromPrint.title}")
             return@withContext fromPrint
         }
 
@@ -113,15 +121,18 @@ class YtDlpRunner(
         }
     }
 
-    private fun parsePlaylistDumpJson(stdout: String): List<YtHit> {
+    private fun parsePlaylistDumpJson(stdout: String): YtPlaylistListing {
         val text = stdout.trim()
-        if (text.isEmpty()) return emptyList()
+        if (text.isEmpty()) return YtPlaylistListing(null, emptyList())
         // Response may include warnings before JSON; find the root object.
         val start = text.indexOf('{')
         val end = text.lastIndexOf('}')
-        if (start < 0 || end <= start) return emptyList()
+        if (start < 0 || end <= start) return YtPlaylistListing(null, emptyList())
         val root = JSONObject(text.substring(start, end + 1))
-        val entries = root.optJSONArray("entries") ?: return emptyList()
+        val playlistTitle = root.optString("title").ifBlank {
+            root.optString("playlist_title")
+        }.ifBlank { null }
+        val entries = root.optJSONArray("entries") ?: return YtPlaylistListing(playlistTitle, emptyList())
         val items = mutableListOf<YtHit>()
         for (i in 0 until entries.length()) {
             val o = entries.optJSONObject(i) ?: continue
@@ -141,7 +152,43 @@ class YtDlpRunner(
                     ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg",
             )
         }
-        return items
+        return YtPlaylistListing(playlistTitle, items)
+    }
+
+    /** TSV with leading playlist_title column from --print. */
+    private fun parsePlaylistTsv(stdout: String): YtPlaylistListing {
+        var playlistTitle: String? = null
+        val items = mutableListOf<YtHit>()
+        for (line in stdout.lineSequence()) {
+            val t = line.trim()
+            if (t.isEmpty() || t.startsWith("WARNING") || t.startsWith("ERROR")) continue
+            val parts = t.split('\t')
+            if (parts.size < 2) continue
+            val maybeTitle = parts[0].trim()
+            val id = parts[1].trim()
+            if (id.length < 6 || id.equals("NA", ignoreCase = true)) continue
+            if (id.contains(' ') || id.contains(':')) continue
+            if (playlistTitle == null && maybeTitle.isNotBlank() &&
+                !maybeTitle.equals("NA", ignoreCase = true)
+            ) {
+                playlistTitle = maybeTitle
+            }
+            val title = parts.getOrNull(2)?.trim().orEmpty().ifBlank { "Unknown" }
+            val uploader = parts.getOrNull(3)?.trim().orEmpty()
+            val durationSec = parts.getOrNull(4)?.trim()?.toDoubleOrNull() ?: 0.0
+            val thumb = parts.getOrNull(5)?.trim().orEmpty()
+                .takeIf { it.startsWith("http") }
+                ?: "https://i.ytimg.com/vi/$id/hqdefault.jpg"
+            items += YtHit(
+                id = id,
+                title = title,
+                uploader = uploader,
+                durationMs = (durationSec * 1000).toLong(),
+                url = "https://www.youtube.com/watch?v=$id",
+                thumbnailUrl = thumb,
+            )
+        }
+        return YtPlaylistListing(playlistTitle, items)
     }
 
     private fun parseTsvHits(stdout: String): List<YtHit> {

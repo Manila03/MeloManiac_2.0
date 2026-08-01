@@ -125,6 +125,36 @@ fun DownloadsScreen(container: AppContainer) {
     val status by container.downloadQueue.status.collectAsState()
     val scope = rememberCoroutineScope()
     val globalBusy by AppBusy.message.collectAsState()
+    var confirmClearQueue by remember { mutableStateOf(false) }
+
+    if (confirmClearQueue) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmClearQueue = false },
+            title = { Text("Vaciar cola") },
+            text = {
+                Text(
+                    "Se cancelarán y eliminarán todos los temas pendientes y en curso. " +
+                        "El historial de descargas finalizadas no se borra.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmClearQueue = false
+                        scope.launch {
+                            AppBusy.run("Vaciando cola…") {
+                                container.downloadQueue.clearQueue()
+                            }
+                        }
+                    },
+                    enabled = globalBusy == null,
+                ) { Text("Vaciar cola", color = MaterialThemeError()) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmClearQueue = false }) { Text("Cancelar") }
+            },
+        )
+    }
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Descargas")
@@ -142,6 +172,9 @@ fun DownloadsScreen(container: AppContainer) {
                     container.downloadQueue.stop()
                 }
             }
+        })
+        GhostButton("Vaciar cola", onClick = {
+            if (globalBusy == null) confirmClearQueue = true
         })
         GhostButton("Limpiar historial", onClick = {
             scope.launch {
