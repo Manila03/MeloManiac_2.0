@@ -53,25 +53,44 @@ class DownloadQueue(
 
     fun isPaused(): Boolean = prefs.getBoolean(PREF_QUEUE_PAUSED, false)
 
+    /**
+     * Resumes the queue and drains pending jobs.
+     * [running] is toggled under [mutex] together with spawn logic so an idle
+     * [pump] cannot clear [running] between "start" and the first spawn (that
+     * race left jobs stuck in `queued` and the library empty).
+     */
     fun start() {
         setPaused(false)
-        running = true
-        _status.value = "Procesando…"
         scope.launch {
             downloadDao.resetStuck(System.currentTimeMillis())
-            pump()
+            mutex.withLock {
+                running = true
+                _status.value = "Procesando…"
+                pumpLocked()
+            }
+        }
+    }
+
+    /** Re-queues rows left as `running` after process death without starting the queue. */
+    fun recoverStuckJobs() {
+        scope.launch {
+            downloadDao.resetStuck(System.currentTimeMillis())
         }
     }
 
     suspend fun stop() {
         mutex.withLock {
             running = false
-            resetGeneration++
             setPaused(true)
             _status.value = "Pausado"
-            AppLog.i("Queue", "Pausado generation=$resetGeneration")
             ytDlp.destroyAll()
             DownloadService.stop(appContext)
+        }
+        // Invalidate workers under commitMutex so an in-flight insert either
+        // fully commits or fully aborts — never tears across a pause.
+        commitMutex.withLock {
+            resetGeneration++
+            AppLog.i("Queue", "Pausado generation=$resetGeneration")
         }
         // Re-queue interrupted jobs so pause does not leave them failed/stuck.
         downloadDao.resetStuck(System.currentTimeMillis())
@@ -84,14 +103,14 @@ class DownloadQueue(
     suspend fun clearQueue() {
         mutex.withLock {
             running = false
-            resetGeneration++
             setPaused(true)
             _status.value = "Pausado"
-            AppLog.i("Queue", "Vaciar cola generation=$resetGeneration")
             ytDlp.destroyAll()
             DownloadService.stop(appContext)
         }
         commitMutex.withLock {
+            resetGeneration++
+            AppLog.i("Queue", "Vaciar cola generation=$resetGeneration")
             downloadDao.clearActive()
         }
     }
@@ -103,14 +122,16 @@ class DownloadQueue(
     suspend fun resetStorage(wipe: suspend () -> Unit) {
         mutex.withLock {
             running = false
-            resetGeneration++
             setPaused(false)
             _status.value = "En espera"
-            AppLog.i("Queue", "Reset generation=$resetGeneration")
             ytDlp.destroyAll()
             DownloadService.stop(appContext)
         }
-        commitMutex.withLock { wipe() }
+        commitMutex.withLock {
+            resetGeneration++
+            AppLog.i("Queue", "Reset generation=$resetGeneration")
+            wipe()
+        }
     }
 
     private fun setPaused(paused: Boolean) {
@@ -131,50 +152,84 @@ class DownloadQueue(
                 AppLog.i("Queue", "Spotify scraper: ${SpotifyUrls.parse(trimmed)?.first ?: "link"}")
                 when (val resolved = spotify.resolve(trimmed)) {
                     is SpotifyResolve.Track -> {
-                        enqueueSpotifyTrack(resolved.track)
-                        start()
-                        return@withContext 1 to "Encolado: ${resolved.track.name}"
+                        val outcome = enqueueSpotifyTrack(resolved.track)
+                        return@withContext when (outcome) {
+                            EnqueueOutcome.ENQUEUED -> {
+                                start()
+                                1 to "Encolado: ${resolved.track.name}"
+                            }
+                            EnqueueOutcome.LINKED_EXISTING ->
+                                0 to "Ya está en la biblioteca: ${resolved.track.name}"
+                            EnqueueOutcome.MERGED_ACTIVE ->
+                                0 to "Ya está en la cola: ${resolved.track.name}"
+                        }
                     }
                     is SpotifyResolve.Collection -> {
                         val c = resolved.collection
                         if (c.type == "album") {
                             val artist = library.getOrCreateArtist(c.tracks.firstOrNull()?.artists?.firstOrNull() ?: "Various Artists")
                             val album = library.getOrCreateAlbum(c.name, artist.id, c.externalUrl)
+                            var enqueued = 0
+                            var linked = 0
                             c.tracks.forEach { t ->
-                                enqueue(
-                                    spotify.searchQuery(t),
-                                    meta {
-                                        put("title", t.name)
-                                        put("artist", t.artists.joinToString(", "))
-                                        put("albumName", c.name)
-                                        put("albumId", album.id)
-                                        put("spotifyId", t.id)
-                                        put("durationMs", t.durationMs)
-                                        (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
-                                    },
-                                )
+                                when (
+                                    enqueueDeduped(
+                                        urlOrQuery = spotify.searchQuery(t),
+                                        youtubeId = null,
+                                        spotifyId = t.id,
+                                        playlistId = null,
+                                        metaJson = meta {
+                                            put("title", t.name)
+                                            put("artist", t.artists.joinToString(", "))
+                                            put("albumName", c.name)
+                                            put("albumId", album.id)
+                                            put("spotifyId", t.id)
+                                            put("durationMs", t.durationMs)
+                                            (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
+                                        },
+                                    )
+                                ) {
+                                    EnqueueOutcome.ENQUEUED -> enqueued++
+                                    EnqueueOutcome.LINKED_EXISTING,
+                                    EnqueueOutcome.MERGED_ACTIVE,
+                                    -> linked++
+                                }
                             }
-                            start()
-                            return@withContext c.tracks.size to "Álbum Spotify \"${c.name}\": ${c.tracks.size} temas"
+                            if (enqueued > 0) start()
+                            return@withContext (enqueued + linked) to
+                                "Álbum Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola"
                         } else {
                             val playlist = library.createPlaylist(c.name, c.externalUrl)
+                            var enqueued = 0
+                            var linked = 0
                             c.tracks.forEach { t ->
-                                enqueue(
-                                    spotify.searchQuery(t),
-                                    meta {
-                                        put("title", t.name)
-                                        put("artist", t.artists.joinToString(", "))
-                                        put("albumName", t.albumName)
-                                        put("playlistId", playlist.id)
-                                        put("playlistName", c.name)
-                                        put("spotifyId", t.id)
-                                        put("durationMs", t.durationMs)
-                                        (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
-                                    },
-                                )
+                                when (
+                                    enqueueDeduped(
+                                        urlOrQuery = spotify.searchQuery(t),
+                                        youtubeId = null,
+                                        spotifyId = t.id,
+                                        playlistId = playlist.id,
+                                        metaJson = meta {
+                                            put("title", t.name)
+                                            put("artist", t.artists.joinToString(", "))
+                                            put("albumName", t.albumName)
+                                            put("playlistId", playlist.id)
+                                            put("playlistName", c.name)
+                                            put("spotifyId", t.id)
+                                            put("durationMs", t.durationMs)
+                                            (t.coverUrl ?: c.coverUrl)?.let { put("coverUrl", it) }
+                                        },
+                                    )
+                                ) {
+                                    EnqueueOutcome.ENQUEUED -> enqueued++
+                                    EnqueueOutcome.LINKED_EXISTING,
+                                    EnqueueOutcome.MERGED_ACTIVE,
+                                    -> linked++
+                                }
                             }
-                            start()
-                            return@withContext c.tracks.size to "Playlist Spotify \"${c.name}\": ${c.tracks.size} temas"
+                            if (enqueued > 0) start()
+                            return@withContext (enqueued + linked) to
+                                "Playlist Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola"
                         }
                     }
                 }
@@ -189,36 +244,60 @@ class DownloadQueue(
                     if (listing.entries.isEmpty()) error("No se pudieron listar temas de la playlist")
                     val playlistName = listing.title?.takeIf { it.isNotBlank() } ?: "YouTube Playlist"
                     val playlist = library.createPlaylist(playlistName, url)
+                    var enqueued = 0
+                    var linked = 0
                     listing.entries.forEach { h ->
-                        enqueue(
-                            h.url,
-                            meta {
-                                put("title", h.title)
-                                put("artist", h.uploader)
-                                put("playlistId", playlist.id)
-                                put("youtubeId", h.id)
-                                put("durationMs", h.durationMs)
-                                h.thumbnailUrl?.let { put("coverUrl", it) }
-                            },
-                        )
+                        when (
+                            enqueueDeduped(
+                                urlOrQuery = h.url,
+                                youtubeId = h.id,
+                                spotifyId = null,
+                                playlistId = playlist.id,
+                                metaJson = meta {
+                                    put("title", h.title)
+                                    put("artist", h.uploader)
+                                    put("playlistId", playlist.id)
+                                    put("youtubeId", h.id)
+                                    put("durationMs", h.durationMs)
+                                    h.thumbnailUrl?.let { put("coverUrl", it) }
+                                },
+                            )
+                        ) {
+                            EnqueueOutcome.ENQUEUED -> enqueued++
+                            EnqueueOutcome.LINKED_EXISTING,
+                            EnqueueOutcome.MERGED_ACTIVE,
+                            -> linked++
+                        }
                     }
-                    start()
-                    return@withContext listing.entries.size to
-                        "Playlist de YouTube \"$playlistName\": ${listing.entries.size} temas"
+                    if (enqueued > 0) start()
+                    return@withContext (enqueued + linked) to
+                        "Playlist de YouTube \"$playlistName\": $enqueued nuevos, $linked ya en biblioteca/cola"
                 }
                 val vid = LinkDetector.youtubeVideoId(trimmed)
                 val url = if (vid != null) "https://www.youtube.com/watch?v=$vid" else trimmed
-                enqueue(
-                    url,
-                    meta {
-                        if (vid != null) {
-                            put("youtubeId", vid)
-                            put("coverUrl", "https://i.ytimg.com/vi/$vid/hqdefault.jpg")
-                        }
-                    },
-                )
-                start()
-                return@withContext 1 to "Video de YouTube encolado"
+                when (
+                    enqueueDeduped(
+                        urlOrQuery = url,
+                        youtubeId = vid,
+                        spotifyId = null,
+                        playlistId = null,
+                        metaJson = meta {
+                            if (vid != null) {
+                                put("youtubeId", vid)
+                                put("coverUrl", "https://i.ytimg.com/vi/$vid/hqdefault.jpg")
+                            }
+                        },
+                    )
+                ) {
+                    EnqueueOutcome.LINKED_EXISTING ->
+                        return@withContext 0 to "Ya está en la biblioteca"
+                    EnqueueOutcome.MERGED_ACTIVE ->
+                        return@withContext 0 to "Ya está en la cola de descargas"
+                    EnqueueOutcome.ENQUEUED -> {
+                        start()
+                        return@withContext 1 to "Video de YouTube encolado"
+                    }
+                }
             }
 
             else -> {
@@ -229,10 +308,13 @@ class DownloadQueue(
         }
     }
 
-    private suspend fun enqueueSpotifyTrack(t: SpotifyTrackMeta) {
-        enqueue(
-            spotify.searchQuery(t),
-            meta {
+    private suspend fun enqueueSpotifyTrack(t: SpotifyTrackMeta): EnqueueOutcome =
+        enqueueDeduped(
+            urlOrQuery = spotify.searchQuery(t),
+            youtubeId = null,
+            spotifyId = t.id,
+            playlistId = null,
+            metaJson = meta {
                 put("title", t.name)
                 put("artist", t.artists.joinToString(", "))
                 put("albumName", t.albumName)
@@ -241,9 +323,95 @@ class DownloadQueue(
                 t.coverUrl?.let { put("coverUrl", it) }
             },
         )
-    }
 
     private fun meta(block: JSONObject.() -> Unit) = JSONObject().apply(block).toString()
+
+    private enum class EnqueueOutcome { ENQUEUED, LINKED_EXISTING, MERGED_ACTIVE }
+
+    /**
+     * Skips download when the song already exists (by youtubeId/spotifyId) or is
+     * already queued/running. For playlists, links the existing track or merges
+     * the playlist id into the active job meta so one download feeds both playlists.
+     */
+    private suspend fun enqueueDeduped(
+        urlOrQuery: String,
+        youtubeId: String?,
+        spotifyId: String?,
+        playlistId: String?,
+        metaJson: String,
+        priority: Int = 0,
+    ): EnqueueOutcome {
+        val existing = library.findTrackByIdentity(youtubeId, spotifyId)
+        if (existing != null) {
+            if (playlistId != null) {
+                library.addTrackToPlaylist(playlistId, existing.id)
+                existing.coverPath?.let { library.setPlaylistCoverIfEmpty(playlistId, it) }
+                AppLog.i("Queue", "dedup link track=${existing.id} → playlist=$playlistId")
+            } else {
+                AppLog.i("Queue", "dedup skip existing track=${existing.id}")
+            }
+            return EnqueueOutcome.LINKED_EXISTING
+        }
+
+        val active = findActiveJob(youtubeId, spotifyId)
+        if (active != null) {
+            if (playlistId != null) {
+                appendPlaylistIdToJob(active, playlistId)
+                AppLog.i("Queue", "dedup merge playlist=$playlistId into job=${active.id}")
+            } else {
+                AppLog.i("Queue", "dedup skip active job=${active.id}")
+            }
+            return EnqueueOutcome.MERGED_ACTIVE
+        }
+
+        enqueue(urlOrQuery, metaJson, priority)
+        return EnqueueOutcome.ENQUEUED
+    }
+
+    private suspend fun findActiveJob(youtubeId: String?, spotifyId: String?): DownloadJobEntity? {
+        val yt = youtubeId?.trim()?.takeIf { it.isNotEmpty() }
+        val sp = spotifyId?.trim()?.takeIf { it.isNotEmpty() }
+        if (yt == null && sp == null) return null
+        for (job in downloadDao.listActive()) {
+            val meta = try {
+                JSONObject(job.metaJson)
+            } catch (_: Exception) {
+                continue
+            }
+            if (yt != null && meta.optString("youtubeId") == yt) return job
+            if (sp != null && meta.optString("spotifyId") == sp) return job
+        }
+        return null
+    }
+
+    private suspend fun appendPlaylistIdToJob(job: DownloadJobEntity, playlistId: String) {
+        val meta = try {
+            JSONObject(job.metaJson)
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        val ids = linkedPlaylistIds(meta).toMutableList()
+        if (playlistId !in ids) ids += playlistId
+        meta.put("playlistId", playlistId)
+        val arr = org.json.JSONArray()
+        ids.forEach { arr.put(it) }
+        meta.put("playlistIds", arr)
+        downloadDao.upsert(
+            job.copy(metaJson = meta.toString(), updatedAt = System.currentTimeMillis()),
+        )
+    }
+
+    private fun linkedPlaylistIds(meta: JSONObject): List<String> {
+        val out = linkedSetOf<String>()
+        meta.optString("playlistId").trim().takeIf { it.isNotEmpty() }?.let { out += it }
+        val arr = meta.optJSONArray("playlistIds")
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                arr.optString(i).trim().takeIf { it.isNotEmpty() }?.let { out += it }
+            }
+        }
+        return out.toList()
+    }
 
     private suspend fun enqueue(urlOrQuery: String, metaJson: String, priority: Int = 0) {
         val now = System.currentTimeMillis()
@@ -265,18 +433,28 @@ class DownloadQueue(
         if (!settings.isTelegramConfigured) {
             return@withContext 0 to "Configurá Telegram en Ajustes antes de descargar"
         }
-        enqueue(
-            hit.url,
-            meta {
-                put("title", hit.title)
-                put("artist", hit.uploader)
-                put("youtubeId", hit.id)
-                put("durationMs", hit.durationMs)
-                hit.thumbnailUrl?.let { put("coverUrl", it) }
-            },
-        )
-        start()
-        1 to "Encolado: ${hit.title}"
+        when (
+            enqueueDeduped(
+                urlOrQuery = hit.url,
+                youtubeId = hit.id,
+                spotifyId = null,
+                playlistId = null,
+                metaJson = meta {
+                    put("title", hit.title)
+                    put("artist", hit.uploader)
+                    put("youtubeId", hit.id)
+                    put("durationMs", hit.durationMs)
+                    hit.thumbnailUrl?.let { put("coverUrl", it) }
+                },
+            )
+        ) {
+            EnqueueOutcome.LINKED_EXISTING -> 0 to "Ya está en la biblioteca: ${hit.title}"
+            EnqueueOutcome.MERGED_ACTIVE -> 0 to "Ya está en la cola: ${hit.title}"
+            EnqueueOutcome.ENQUEUED -> {
+                start()
+                1 to "Encolado: ${hit.title}"
+            }
+        }
     }
 
     /**
@@ -358,40 +536,43 @@ class DownloadQueue(
     }
 
     private suspend fun pump() {
-        mutex.withLock {
-            if (!running) return
-            val settings = settingsRepo.get()
-            val concurrency = settings.downloadConcurrency.coerceIn(1, 4)
-            while (running && workers < concurrency) {
-                val needed = concurrency - workers
-                val queued = downloadDao.nextQueued(needed).filter { it.id !in inFlight }
-                if (queued.isEmpty()) break
-                ensureForeground("Descargando…")
-                for (job in queued) {
-                    val workerGeneration = resetGeneration
-                    workers++
-                    inFlight += job.id
-                    scope.launch {
-                        try {
-                            process(job, workerGeneration)
-                        } finally {
-                            mutex.withLock {
-                                workers--
-                                inFlight -= job.id
-                            }
-                            if (running) pump()
+        mutex.withLock { pumpLocked() }
+    }
+
+    /** Caller must hold [mutex]. */
+    private suspend fun pumpLocked() {
+        if (!running) return
+        val settings = settingsRepo.get()
+        val concurrency = settings.downloadConcurrency.coerceIn(1, 4)
+        while (running && workers < concurrency) {
+            val needed = concurrency - workers
+            val queued = downloadDao.nextQueued(needed).filter { it.id !in inFlight }
+            if (queued.isEmpty()) break
+            ensureForeground("Descargando…")
+            for (job in queued) {
+                val workerGeneration = resetGeneration
+                workers++
+                inFlight += job.id
+                scope.launch {
+                    try {
+                        process(job, workerGeneration)
+                    } finally {
+                        mutex.withLock {
+                            workers--
+                            inFlight -= job.id
+                            if (running) pumpLocked()
                         }
                     }
                 }
             }
-            if (workers == 0 && downloadDao.nextQueued(1).isEmpty()) {
-                running = false
-                _status.value = "En espera"
-                DownloadService.stop(appContext)
-            } else if (running) {
-                _status.value = "Procesando…"
-                refreshForeground()
-            }
+        }
+        if (workers == 0 && downloadDao.nextQueued(1).isEmpty()) {
+            running = false
+            _status.value = if (isPaused()) "Pausado" else "En espera"
+            DownloadService.stop(appContext)
+        } else if (running) {
+            _status.value = "Procesando…"
+            refreshForeground()
         }
     }
 
@@ -606,13 +787,14 @@ class DownloadQueue(
                 }
             }
             val trackFormat = if (packed.progressive) result.format else "hls"
+            val playlistIds = linkedPlaylistIds(meta)
             val committed = commitIfCurrent(workerGeneration) {
                 library.insertDownloadedTrack(
                     title = meta.optString("title").ifBlank { result.title },
                     artistName = meta.optString("artist").ifBlank { null } ?: result.artist,
                     albumName = meta.optString("albumName").ifBlank { null },
                     albumId = meta.optString("albumId").ifBlank { null },
-                    playlistId = meta.optString("playlistId").ifBlank { null },
+                    playlistId = playlistIds.firstOrNull(),
                     path = null,
                     format = trackFormat,
                     durationMs = when {
@@ -628,11 +810,16 @@ class DownloadQueue(
                     coverPath = coverPath,
                     storageMode = TrackEntity.STORAGE_TELEGRAM,
                     segments = uploaded,
+                    playlistIds = playlistIds,
                 )
                 downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
             }
             if (!committed) {
-                AppLog.i("Queue", "discarded stale online job=${job.id} at insert")
+                // Ensure the job is not left as `running` forever if pause/clear raced the insert.
+                runCatching {
+                    downloadDao.update(job.id, "queued", 0f, null, System.currentTimeMillis())
+                }
+                AppLog.i("Queue", "discarded stale online job=${job.id} at insert → re-queued")
                 return
             }
             AppLog.i(

@@ -42,6 +42,28 @@ class LibraryRepository(private val dao: LibraryDao) {
         return playlist
     }
 
+    suspend fun renamePlaylist(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        dao.renamePlaylist(id, trimmed)
+    }
+
+    /**
+     * Deletes the playlist row (CASCADE clears [playlist_tracks] links).
+     * Tracks that are no longer in any playlist are removed from the library;
+     * tracks still referenced by another playlist are kept.
+     */
+    suspend fun deletePlaylist(id: String): List<String> {
+        val trackIds = dao.trackIdsInPlaylist(id)
+        dao.deletePlaylistRow(id)
+        val orphanCovers = mutableListOf<String>()
+        for (trackId in trackIds) {
+            if (dao.countPlaylistMemberships(trackId) > 0) continue
+            deleteTrack(trackId)?.let { orphanCovers += it }
+        }
+        return orphanCovers
+    }
+
     suspend fun createFolder(name: String): FolderEntity {
         val folder = FolderEntity(id = newId(), name = name.trim())
         dao.upsertFolder(folder)
@@ -51,6 +73,23 @@ class LibraryRepository(private val dao: LibraryDao) {
     suspend fun addTrackToPlaylist(playlistId: String, trackId: String) {
         val pos = (dao.maxPlaylistPosition(playlistId) ?: -1) + 1
         dao.insertPlaylistTrack(PlaylistTrackEntity(playlistId, trackId, pos))
+    }
+
+    suspend fun removeTrackFromPlaylist(playlistId: String, trackId: String) {
+        dao.removePlaylistTrack(playlistId, trackId)
+    }
+
+    suspend fun setPlaylistCoverIfEmpty(playlistId: String, coverPath: String) {
+        dao.setPlaylistCoverIfEmpty(playlistId, coverPath)
+    }
+
+    /** Stable identity lookup used for download dedup / multi-playlist links. */
+    suspend fun findTrackByIdentity(youtubeId: String?, spotifyId: String?): TrackEntity? {
+        val yt = youtubeId?.trim()?.takeIf { it.isNotEmpty() }
+        if (yt != null) dao.findTrackByYoutubeId(yt)?.let { return it }
+        val sp = spotifyId?.trim()?.takeIf { it.isNotEmpty() }
+        if (sp != null) dao.findTrackBySpotifyId(sp)?.let { return it }
+        return null
     }
 
     suspend fun insertDownloadedTrack(
@@ -70,7 +109,28 @@ class LibraryRepository(private val dao: LibraryDao) {
         coverPath: String? = null,
         storageMode: String = TrackEntity.STORAGE_LOCAL,
         segments: List<TrackSegmentEntity> = emptyList(),
+        playlistIds: List<String> = emptyList(),
     ): TrackEntity {
+        val allPlaylistIds = (listOfNotNull(playlistId?.takeIf { it.isNotBlank() }) + playlistIds)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+
+        // Reuse an existing library row when the same YouTube/Spotify identity is already present.
+        val existing = findTrackByIdentity(youtubeId, spotifyId)
+        if (existing != null) {
+            if (segments.isNotEmpty()) {
+                dao.deleteSegments(existing.id)
+                dao.upsertSegments(segments.map { it.copy(trackId = existing.id) })
+            }
+            if (!coverPath.isNullOrBlank()) {
+                existing.albumId?.let { dao.setAlbumCoverIfEmpty(it, coverPath) }
+                for (pid in allPlaylistIds) dao.setPlaylistCoverIfEmpty(pid, coverPath)
+            }
+            for (pid in allPlaylistIds) addTrackToPlaylist(pid, existing.id)
+            return existing
+        }
+
         val artist = getOrCreateArtist(artistName ?: "Unknown Artist")
         val resolvedAlbumId = albumId
             ?: albumName?.takeIf { it.isNotBlank() }?.let { getOrCreateAlbum(it, artist.id).id }
@@ -97,13 +157,13 @@ class LibraryRepository(private val dao: LibraryDao) {
         }
         if (!coverPath.isNullOrBlank()) {
             dao.setAlbumCoverIfEmpty(resolvedAlbumId, coverPath)
-            if (playlistId != null) dao.setPlaylistCoverIfEmpty(playlistId, coverPath)
+            for (pid in allPlaylistIds) dao.setPlaylistCoverIfEmpty(pid, coverPath)
         }
         if (!genre.isNullOrBlank()) {
             val g = dao.findGenreByName(genre) ?: GenreEntity(newId(), genre.trim()).also { dao.upsertGenre(it) }
             dao.insertGenreTrack(GenreTrackEntity(g.id, track.id))
         }
-        if (playlistId != null) addTrackToPlaylist(playlistId, track.id)
+        for (pid in allPlaylistIds) addTrackToPlaylist(pid, track.id)
         return track
     }
 

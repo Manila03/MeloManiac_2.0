@@ -56,8 +56,12 @@ fun LibraryHomeScreen(
     onBrowse: () -> Unit,
     onPlay: (List<TrackRow>, Int) -> Unit,
 ) {
-    val tracks by container.library.observeTracks().collectAsState(initial = emptyList())
-    val count by container.library.observeTrackCount().collectAsState(initial = 0)
+    // Fresh Flow collection each composition entry so returning to Home after
+    // downloads always picks up Room invalidations (not a stale empty snapshot).
+    val tracks by remember(container) { container.library.observeTracks() }
+        .collectAsState(initial = emptyList())
+    val count by remember(container) { container.library.observeTrackCount() }
+        .collectAsState(initial = 0)
     val scope = rememberCoroutineScope()
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {

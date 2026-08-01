@@ -218,6 +218,27 @@ interface LibraryDao {
     @Query("SELECT * FROM tracks WHERE id = :id")
     suspend fun getTrack(id: String): TrackEntity?
 
+    @Query("SELECT * FROM tracks WHERE youtubeId = :youtubeId LIMIT 1")
+    suspend fun findTrackByYoutubeId(youtubeId: String): TrackEntity?
+
+    @Query("SELECT * FROM tracks WHERE spotifyId = :spotifyId LIMIT 1")
+    suspend fun findTrackBySpotifyId(spotifyId: String): TrackEntity?
+
+    @Query("SELECT trackId FROM playlist_tracks WHERE playlistId = :playlistId ORDER BY position ASC")
+    suspend fun trackIdsInPlaylist(playlistId: String): List<String>
+
+    @Query("SELECT COUNT(*) FROM playlist_tracks WHERE trackId = :trackId")
+    suspend fun countPlaylistMemberships(trackId: String): Int
+
+    @Query("UPDATE playlists SET name = :name WHERE id = :id")
+    suspend fun renamePlaylist(id: String, name: String)
+
+    @Query("DELETE FROM playlists WHERE id = :id")
+    suspend fun deletePlaylistRow(id: String)
+
+    @Query("DELETE FROM playlist_tracks WHERE playlistId = :playlistId AND trackId = :trackId")
+    suspend fun removePlaylistTrack(playlistId: String, trackId: String)
+
     @Query("DELETE FROM playlist_tracks WHERE trackId = :trackId")
     suspend fun deletePlaylistLinks(trackId: String)
 
@@ -317,6 +338,9 @@ interface DownloadDao {
 
     @Query("DELETE FROM download_jobs WHERE status != 'running'")
     suspend fun clearAllExceptRunning()
+
+    @Query("SELECT * FROM download_jobs WHERE status IN ('queued','running')")
+    suspend fun listActive(): List<DownloadJobEntity>
 
     @Query("DELETE FROM download_jobs WHERE id = :id")
     suspend fun delete(id: String)

@@ -1,13 +1,18 @@
 package com.melomaniac.app.ui.screens
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -15,11 +20,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.TrackRow
 import com.melomaniac.app.ui.AppTextField
+import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.ui.Muted
 import com.melomaniac.app.ui.PrimaryButton
 import com.melomaniac.app.ui.ScreenTitle
@@ -37,12 +44,16 @@ private fun LibraryTrackList(
     tracks: List<TrackRow>,
     onPlay: (List<TrackRow>, Int) -> Unit,
     scope: CoroutineScope,
+    onDelete: ((String) -> Unit)? = null,
+    deleteDialogTitle: String = "Borrar canción",
+    deleteDialogText: ((TrackRow) -> String)? = null,
+    deleteConfirmLabel: String = "Borrar",
 ) {
     TrackList(
         tracks = tracks,
         onPlay = onPlay,
         onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
-        onDelete = { id ->
+        onDelete = onDelete ?: { id ->
             scope.launch {
                 AppBusy.run("Borrando…") {
                     val orphan = container.library.deleteTrack(id)
@@ -56,6 +67,9 @@ private fun LibraryTrackList(
                 AppLog.i("Library", msg)
             }
         },
+        deleteDialogTitle = deleteDialogTitle,
+        deleteDialogText = deleteDialogText,
+        deleteConfirmLabel = deleteConfirmLabel,
     )
 }
 
@@ -103,7 +117,7 @@ fun PlaylistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
         }
         LazyColumn {
             items(playlists, key = { it.id }) { p ->
-                SimpleListItem(p.name) { onOpen(p.id) }
+                SimpleListItem(p.name, "Tocá para abrir · editar o borrar adentro") { onOpen(p.id) }
             }
         }
     }
@@ -195,36 +209,164 @@ fun AlbumDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRo
 }
 
 @Composable
-fun PlaylistDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRow>, Int) -> Unit) {
+fun PlaylistDetailScreen(
+    container: AppContainer,
+    id: String,
+    onPlay: (List<TrackRow>, Int) -> Unit,
+    onDeleted: () -> Unit = {},
+) {
     val tracks by container.library.observeTracksByPlaylist(id).collectAsState(initial = emptyList())
+    val allTracks by container.library.observeTracks().collectAsState(initial = emptyList())
     var title by remember { mutableStateOf("Playlist") }
     var status by remember { mutableStateOf<String?>(null) }
+    var editingName by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf("") }
+    var editingTracks by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val globalBusy by AppBusy.message.collectAsState()
+
     androidx.compose.runtime.LaunchedEffect(id) {
-        title = container.library.getPlaylist(id)?.name ?: "Playlist"
+        val playlist = container.library.getPlaylist(id)
+        title = playlist?.name ?: "Playlist"
+        nameDraft = playlist?.name.orEmpty()
     }
+
+    if (confirmDelete) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Eliminar playlist") },
+            text = {
+                Text(
+                    "Se elimina \"$title\" y los temas que solo pertenecen a esta playlist. " +
+                        "Los temas que también están en otras playlists se conservan.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        scope.launch {
+                            AppBusy.run("Eliminando playlist…") {
+                                val orphans = container.library.deletePlaylist(id)
+                                orphans.forEach { container.covers.deleteIfExists(it) }
+                            }
+                            onDeleted()
+                        }
+                    },
+                    enabled = globalBusy == null,
+                ) { Text("Eliminar", color = androidx.compose.material3.MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") }
+            },
+        )
+    }
+
     val needsLocal = tracks.filter { it.needsLocalDownload }
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        if (needsLocal.isNotEmpty()) {
-            PrimaryButton("Descargar playlist localmente (${needsLocal.size})") {
+        if (editingName) {
+            AppTextField(nameDraft, { nameDraft = it }, "Nombre de la playlist")
+            PrimaryButton("Guardar nombre", enabled = globalBusy == null) {
                 scope.launch {
-                    val (_, msg) = container.downloadQueue.enqueueLocalDownloads(
-                        needsLocal.map { it.id },
-                    )
-                    status = msg
-                    AppLog.i("Library", msg)
+                    AppBusy.run("Guardando…") {
+                        container.library.renamePlaylist(id, nameDraft)
+                        title = nameDraft.trim().ifBlank { title }
+                        editingName = false
+                    }
                 }
             }
+            GhostButton("Cancelar") { editingName = false }
             Spacer(Modifier.height(8.dp))
-        } else if (tracks.isNotEmpty()) {
-            Muted("Todos los temas ya están locales.")
+        } else {
+            Row(Modifier.fillMaxWidth()) {
+                GhostButton("Renombrar", modifier = Modifier.weight(1f)) {
+                    nameDraft = title
+                    editingName = true
+                }
+                Spacer(Modifier.width(8.dp))
+                GhostButton(
+                    if (editingTracks) "Listo" else "Editar temas",
+                    modifier = Modifier.weight(1f),
+                ) { editingTracks = !editingTracks }
+            }
+            GhostButton("Eliminar playlist") {
+                if (globalBusy == null) confirmDelete = true
+            }
             Spacer(Modifier.height(8.dp))
         }
-        status?.let {
-            Text(it, color = Accent, modifier = Modifier.padding(bottom = 8.dp))
+
+        if (editingTracks) {
+            Muted("Marcá para agregar o quitar temas de esta playlist (no borra de la biblioteca).")
+            Spacer(Modifier.height(8.dp))
+            val inPlaylist = tracks.map { it.id }.toSet()
+            LazyColumn(Modifier.weight(1f)) {
+                items(allTracks, key = { it.id }) { track ->
+                    val checked = track.id in inPlaylist
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = checked,
+                            onCheckedChange = { on ->
+                                scope.launch {
+                                    if (on) {
+                                        container.library.addTrackToPlaylist(id, track.id)
+                                    } else {
+                                        container.library.removeTrackFromPlaylist(id, track.id)
+                                    }
+                                }
+                            },
+                        )
+                        Column(Modifier.padding(start = 8.dp)) {
+                            Text(track.title)
+                            Muted(listOfNotNull(track.artistName, track.albumName).joinToString(" · "))
+                        }
+                    }
+                }
+            }
+        } else {
+            if (needsLocal.isNotEmpty()) {
+                PrimaryButton("Descargar playlist localmente (${needsLocal.size})") {
+                    scope.launch {
+                        val (_, msg) = container.downloadQueue.enqueueLocalDownloads(
+                            needsLocal.map { it.id },
+                        )
+                        status = msg
+                        AppLog.i("Library", msg)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            } else if (tracks.isNotEmpty()) {
+                Muted("Todos los temas ya están locales.")
+                Spacer(Modifier.height(8.dp))
+            }
+            status?.let {
+                Text(it, color = Accent, modifier = Modifier.padding(bottom = 8.dp))
+            }
+            LibraryTrackList(
+                container = container,
+                tracks = tracks,
+                onPlay = onPlay,
+                scope = scope,
+                onDelete = { trackId ->
+                    scope.launch {
+                        AppBusy.run("Sacando de la playlist…") {
+                            container.library.removeTrackFromPlaylist(id, trackId)
+                        }
+                    }
+                },
+                deleteDialogTitle = "Quitar de la playlist",
+                deleteDialogText = { t ->
+                    "¿Sacar \"${t.title}\" de esta playlist? El tema sigue en la biblioteca."
+                },
+                deleteConfirmLabel = "Quitar",
+            )
         }
-        LibraryTrackList(container, tracks, onPlay, scope)
     }
 }
 

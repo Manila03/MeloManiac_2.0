@@ -244,7 +244,12 @@ fun MeloApp(
                     AlbumDetailScreen(container, it.arguments!!.getString("id")!!, ::play)
                 }
                 composable("playlist/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
-                    PlaylistDetailScreen(container, it.arguments!!.getString("id")!!, ::play)
+                    PlaylistDetailScreen(
+                        container = container,
+                        id = it.arguments!!.getString("id")!!,
+                        onPlay = ::play,
+                        onDeleted = { nav.popBackStack() },
+                    )
                 }
                 composable("genre/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
                     GenreDetailScreen(container, it.arguments!!.getString("id")!!, ::play)

@@ -95,6 +95,9 @@ fun TrackList(
     onToggleFavorite: (String) -> Unit,
     onDelete: ((String) -> Unit)? = null,
     onDownloadLocal: ((String) -> Unit)? = null,
+    deleteDialogTitle: String = "Borrar canción",
+    deleteDialogText: ((TrackRow) -> String)? = null,
+    deleteConfirmLabel: String = "Borrar",
 ) {
     if (tracks.isEmpty()) {
         Text("Sin temas", color = TextMuted, modifier = Modifier.padding(24.dp))
@@ -104,18 +107,19 @@ fun TrackList(
     val pendingTrack = tracks.firstOrNull { it.id == pendingDeleteId }
     val pendingTitle = pendingTrack?.title
 
-    if (pendingDeleteId != null) {
+    if (pendingDeleteId != null && pendingTrack != null) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { pendingDeleteId = null },
-            title = { Text("Borrar canción") },
+            title = { Text(deleteDialogTitle) },
             text = {
                 Text(
-                    if (pendingTrack?.hasLocalFile != true && pendingTrack?.isOnline == true) {
-                        "¿Borrar \"${pendingTitle ?: "este tema"}\" de la biblioteca? " +
-                            "(Los segmentos en Telegram no se eliminan del canal.)"
-                    } else {
-                        "¿Borrar \"${pendingTitle ?: "este tema"}\" del dispositivo y de la biblioteca?"
-                    },
+                    deleteDialogText?.invoke(pendingTrack)
+                        ?: if (pendingTrack.hasLocalFile != true && pendingTrack.isOnline) {
+                            "¿Borrar \"${pendingTitle ?: "este tema"}\" de la biblioteca? " +
+                                "(Los segmentos en Telegram no se eliminan del canal.)"
+                        } else {
+                            "¿Borrar \"${pendingTitle ?: "este tema"}\" del dispositivo y de la biblioteca?"
+                        },
                 )
             },
             confirmButton = {
@@ -123,7 +127,7 @@ fun TrackList(
                     val id = pendingDeleteId
                     pendingDeleteId = null
                     if (id != null) onDelete?.invoke(id)
-                }) { Text("Borrar", color = Accent) }
+                }) { Text(deleteConfirmLabel, color = Accent) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDeleteId = null }) { Text("Cancelar") }

@@ -52,7 +52,10 @@ class AppContainer(context: Context) {
     val player = PlayerController(appContext, library, hlsProxy)
 
     init {
-        if (!downloadQueue.isPaused()) {
+        if (downloadQueue.isPaused()) {
+            // Recover rows left as `running` after process death; keep queue paused.
+            downloadQueue.recoverStuckJobs()
+        } else {
             downloadQueue.start()
         }
     }
