@@ -491,12 +491,6 @@ fun PlaylistDetailScreen(
                         }
                     }
                 },
-                onMoveUp = { trackId ->
-                    scope.launch { container.library.movePlaylistTrack(id, trackId, -1) }
-                },
-                onMoveDown = { trackId ->
-                    scope.launch { container.library.movePlaylistTrack(id, trackId, 1) }
-                },
                 emptyMessage = "Esta playlist está vacía. Usá Editar temas.",
                 deleteDialogTitle = "Quitar de la playlist",
                 deleteDialogText = { t ->

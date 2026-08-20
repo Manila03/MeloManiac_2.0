@@ -17,6 +17,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
@@ -163,26 +165,44 @@ fun NowPlayingScreen(container: AppContainer, player: PlayerController) {
             LazyColumn(Modifier.weight(1f)) {
                 itemsIndexed(state.queue, key = { index, q -> "$index-${q.id}" }) { index, item ->
                     val current = index == state.queueIndex
-                    Column(
+                    Row(
                         Modifier
                             .fillMaxWidth()
-                            .clickable { player.seekToIndex(index) }
-                            .padding(vertical = 8.dp),
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            item.title.ifBlank { "Tema" },
-                            fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
-                            color = if (current) Accent else androidx.compose.ui.graphics.Color.Unspecified,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            item.artist.orEmpty(),
-                            color = TextMuted,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .clickable { player.seekToIndex(index) },
+                        ) {
+                            Text(
+                                item.title.ifBlank { "Tema" },
+                                fontWeight = if (current) FontWeight.Bold else FontWeight.Normal,
+                                color = if (current) Accent else androidx.compose.ui.graphics.Color.Unspecified,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                item.artist.orEmpty(),
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        IconButton(
+                            onClick = { player.moveQueueItem(index, -1) },
+                            enabled = index > 0,
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Subir", tint = TextMuted)
+                        }
+                        IconButton(
+                            onClick = { player.moveQueueItem(index, 1) },
+                            enabled = index < state.queue.lastIndex,
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Bajar", tint = TextMuted)
+                        }
                     }
                 }
             }

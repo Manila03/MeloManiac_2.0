@@ -129,6 +129,15 @@ class PlayerController(
         }
     }
 
+    /** Swap queue item with neighbor; [direction] -1 = up, +1 = down. */
+    fun moveQueueItem(index: Int, direction: Int) {
+        val c = controller ?: return
+        val target = index + direction
+        if (index !in 0 until c.mediaItemCount || target !in 0 until c.mediaItemCount) return
+        c.moveMediaItem(index, target)
+        syncFromPlayer()
+    }
+
     fun playNext(track: TrackRow) {
         val c = controller ?: return
         scope.launch {
