@@ -8,8 +8,10 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.melomaniac.app.util.AppLog
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.CountDownLatch
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference
 /**
  * Resuelve metadata pública de Spotify sin Web API / OAuth.
  * Cascada: embed HTML → página abierta → WebView oculto.
+ * Playlists: el embed corta en ~100 temas; se completa con Pathfinder (token anónimo del embed).
  */
 class SpotifyScraper(
     private val appContext: Context? = null,
@@ -55,7 +58,7 @@ class SpotifyScraper(
                         null
                     }
                 if (entity != null) {
-                    val result = mapEntity(entity, type, id)
+                    val result = finalizeResolve(mapEntity(entity, type, id), html)
                     logResolved(name, result)
                     return result
                 }
@@ -70,7 +73,7 @@ class SpotifyScraper(
                 val html = fetchViaWebView("https://open.spotify.com/embed/$type/$id")
                 val entity = extractEntityJson(html)
                     ?: error("WebView no devolvió metadata")
-                val result = mapEntity(entity, type, id)
+                val result = finalizeResolve(mapEntity(entity, type, id), html)
                 logResolved("webview", result)
                 return result
             } catch (e: Exception) {
@@ -93,11 +96,219 @@ class SpotifyScraper(
             is SpotifyResolve.Collection -> {
                 val c = result.collection
                 AppLog.i(TAG, "strategy=$strategy ${c.type} → ${c.tracks.size} items (${c.name})")
-                if (c.tracks.size >= EMBED_SOFT_CAP) {
-                    AppLog.w(TAG, "tracksMayBePartial: embed devolvió ${c.tracks.size} (posible tope)")
-                }
             }
         }
+    }
+
+    /**
+     * El embed SSR suele devolver como máximo [EMBED_TRACK_CAP] temas.
+     * Para playlists, completa con Pathfinder usando el accessToken anónimo del HTML.
+     */
+    private fun finalizeResolve(result: SpotifyResolve, html: String): SpotifyResolve {
+        if (result !is SpotifyResolve.Collection) return result
+        val c = result.collection
+        if (c.type != "playlist") return result
+
+        val token = extractAccessToken(html)
+        if (token.isNullOrBlank()) {
+            if (c.tracks.size >= EMBED_TRACK_CAP) {
+                AppLog.w(TAG, "playlist may be truncated at ${c.tracks.size} (sin accessToken)")
+            }
+            return result
+        }
+
+        return try {
+            val (pathName, pathTracks) = fetchAllPlaylistTracks(token, c.id)
+            if (pathTracks.isEmpty()) {
+                AppLog.w(TAG, "pathfinder returned 0 tracks; keeping embed (${c.tracks.size})")
+                return result
+            }
+            AppLog.i(
+                TAG,
+                "pathfinder playlist ${c.id}: ${pathTracks.size} tracks " +
+                    "(embed had ${c.tracks.size})",
+            )
+            SpotifyResolve.Collection(
+                c.copy(
+                    name = pathName?.takeIf { it.isNotBlank() } ?: c.name,
+                    tracks = pathTracks,
+                ),
+            )
+        } catch (e: Exception) {
+            AppLog.w(TAG, "pathfinder failed, keeping embed: ${e.message}")
+            if (c.tracks.size >= EMBED_TRACK_CAP) {
+                AppLog.w(TAG, "playlist may be truncated at ${c.tracks.size}")
+            }
+            result
+        }
+    }
+
+    private fun extractAccessToken(html: String): String? =
+        Regex(""""accessToken"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+
+    private fun fetchAllPlaylistTracks(
+        accessToken: String,
+        playlistId: String,
+    ): Pair<String?, List<SpotifyTrackMeta>> {
+        val out = ArrayList<SpotifyTrackMeta>()
+        val seen = HashSet<String>()
+        var offset = 0
+        var total: Int? = null
+        var playlistName: String? = null
+        var pages = 0
+
+        while (pages < PATHFINDER_MAX_PAGES) {
+            pages++
+            val page = pathfinderPlaylistPage(accessToken, playlistId, offset, PATHFINDER_PAGE_SIZE)
+            val pl = page.optJSONObject("data")?.optJSONObject("playlistV2")
+                ?: error("pathfinder sin playlistV2")
+            if (playlistName == null) {
+                playlistName = pl.optString("name").takeIf { it.isNotBlank() }
+            }
+            val content = pl.optJSONObject("content")
+                ?: error("pathfinder sin content")
+            if (total == null && content.has("totalCount")) {
+                total = content.optInt("totalCount")
+            }
+            val items = content.optJSONArray("items") ?: JSONArray()
+            if (items.length() == 0) break
+
+            for (i in 0 until items.length()) {
+                val track = mapPathfinderPlaylistItem(items.optJSONObject(i) ?: continue) ?: continue
+                if (seen.add(track.id)) out += track
+            }
+
+            offset += PATHFINDER_PAGE_SIZE
+            if (items.length() < PATHFINDER_PAGE_SIZE) break
+            if (total != null && offset >= total) break
+        }
+
+        AppLog.i(
+            TAG,
+            "pathfinder pages=$pages collected=${out.size} totalCount=${total ?: "?"}",
+        )
+        return playlistName to out
+    }
+
+    private fun pathfinderPlaylistPage(
+        accessToken: String,
+        playlistId: String,
+        offset: Int,
+        limit: Int,
+    ): JSONObject {
+        val bodyJson = JSONObject()
+            .put("operationName", "fetchPlaylist")
+            .put(
+                "variables",
+                JSONObject()
+                    .put("uri", "spotify:playlist:$playlistId")
+                    .put("offset", offset)
+                    .put("limit", limit)
+                    .put("enableWatchFeedEntrypoint", false),
+            )
+            .put(
+                "extensions",
+                JSONObject().put(
+                    "persistedQuery",
+                    JSONObject()
+                        .put("version", 1)
+                        .put("sha256Hash", PATHFINDER_PLAYLIST_HASH),
+                ),
+            )
+            .toString()
+        var lastError: String? = null
+        for (url in PATHFINDER_URLS) {
+            val body = bodyJson.toRequestBody(JSON_MEDIA_TYPE)
+            val req = Request.Builder()
+                .url(url)
+                .post(body)
+                .header("Authorization", "Bearer $accessToken")
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .header("App-Platform", "WebPlayer")
+                .header("Origin", "https://open.spotify.com")
+                .header("Referer", "https://open.spotify.com/")
+                .build()
+            try {
+                client.newCall(req).execute().use { resp ->
+                    val text = resp.body?.string().orEmpty()
+                    if (!resp.isSuccessful) {
+                        lastError = "HTTP ${resp.code}"
+                        return@use
+                    }
+                    val json = JSONObject(text)
+                    if (json.has("errors")) {
+                        lastError = json.optJSONArray("errors")?.optJSONObject(0)
+                            ?.optString("message")
+                            ?: "pathfinder errors"
+                        return@use
+                    }
+                    return json
+                }
+            } catch (e: Exception) {
+                lastError = e.message
+            }
+        }
+        error(lastError ?: "pathfinder request failed")
+    }
+
+    private fun mapPathfinderPlaylistItem(item: JSONObject): SpotifyTrackMeta? {
+        val data = item.optJSONObject("itemV2")?.optJSONObject("data") ?: return null
+        if (!data.optString("__typename").equals("Track", ignoreCase = true)) return null
+        val uri = data.optString("uri")
+        val id = when {
+            uri.startsWith("spotify:track:") -> uri.removePrefix("spotify:track:")
+            else -> data.optString("id")
+        }
+        if (id.isBlank()) return null
+        val name = data.optString("name")
+        if (name.isBlank()) return null
+
+        val artists = mutableListOf<String>()
+        val artistItems = data.optJSONObject("artists")?.optJSONArray("items")
+        if (artistItems != null) {
+            for (i in 0 until artistItems.length()) {
+                artistItems.optJSONObject(i)
+                    ?.optJSONObject("profile")
+                    ?.optString("name")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { artists += it }
+            }
+        }
+
+        val album = data.optJSONObject("albumOfTrack")
+        val albumName = album?.optString("name").orEmpty()
+        val cover = album?.optJSONObject("coverArt")?.optJSONArray("sources")
+            ?.let { sources ->
+                // Prefer larger art when present
+                var bestUrl: String? = null
+                var bestArea = -1
+                for (i in 0 until sources.length()) {
+                    val s = sources.optJSONObject(i) ?: continue
+                    val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+                    val area = s.optInt("height") * s.optInt("width")
+                    if (area >= bestArea) {
+                        bestArea = area
+                        bestUrl = url
+                    }
+                }
+                bestUrl
+            }
+
+        val durationMs = data.optJSONObject("trackDuration")
+            ?.optLong("totalMilliseconds")
+            ?: data.optLong("duration")
+
+        return SpotifyTrackMeta(
+            id = id,
+            name = name,
+            artists = artists,
+            albumName = albumName,
+            durationMs = durationMs,
+            coverUrl = cover,
+            externalUrl = "https://open.spotify.com/track/$id",
+        )
     }
 
     private fun fetchHtml(url: String): String {
@@ -373,7 +584,18 @@ class SpotifyScraper(
 
     companion object {
         private const val TAG = "SpotifyScraper"
-        private const val EMBED_SOFT_CAP = 50
+        /** Soft SSR cap observed on open.spotify.com/embed playlists. */
+        private const val EMBED_TRACK_CAP = 100
+        private const val PATHFINDER_PAGE_SIZE = 100
+        /** Spotify playlist maximum is 10_000 tracks. */
+        private const val PATHFINDER_MAX_PAGES = 100
+        private const val PATHFINDER_PLAYLIST_HASH =
+            "7982b11e21535cd2594badc40030b745671b61a1fa66766e569d45e6364f3422"
+        private val PATHFINDER_URLS = listOf(
+            "https://api-partner.spotify.com/pathfinder/v1/query",
+            "https://api-partner.spotify.com/pathfinder/v2/query",
+        )
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"

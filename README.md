@@ -69,7 +69,7 @@ GitHub Actions construye el APK y lo adjunta al Release como `MeloManiac.apk`.
 
 ## Spotify
 
-Sin Web API ni OAuth. MeloManiac lee metadata pública del embed de Spotify (`open.spotify.com/embed/…`) y, si hace falta, de la página abierta o un WebView oculto.
+Sin Web API ni OAuth. MeloManiac lee metadata pública del embed de Spotify (`open.spotify.com/embed/…`) y, si hace falta, de la página abierta o un WebView oculto. Las playlists largas se completan paginando Pathfinder (token anónimo del propio embed; el HTML del embed corta ~100 temas).
 
 1. Pegá un link público de tema / álbum / playlist en **Buscar** (o compartilo a la app).
 2. La app encola queries `"título artista"` y descarga el audio desde YouTube con yt-dlp.
