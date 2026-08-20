@@ -77,6 +77,18 @@ interface LibraryDao {
         FROM tracks t
         LEFT JOIN artists a ON a.id = t.artistId
         LEFT JOIN albums al ON al.id = t.albumId
+        ORDER BY t.createdAt DESC, t.title COLLATE NOCASE
+        """,
+    )
+    fun observeTracksByAdded(): Flow<List<TrackRow>>
+
+    @Query(
+        """
+        SELECT t.*, a.name AS artistName, al.name AS albumName,
+               COALESCE(t.coverPath, al.coverPath) AS coverPathJoined
+        FROM tracks t
+        LEFT JOIN artists a ON a.id = t.artistId
+        LEFT JOIN albums al ON al.id = t.albumId
         WHERE t.title LIKE '%' || :q || '%' OR a.name LIKE '%' || :q || '%' OR al.name LIKE '%' || :q || '%'
         ORDER BY t.title COLLATE NOCASE LIMIT 100
         """,

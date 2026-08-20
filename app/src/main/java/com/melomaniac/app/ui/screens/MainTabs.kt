@@ -54,30 +54,42 @@ import org.json.JSONObject
 fun LibraryHomeScreen(
     container: AppContainer,
     onBrowse: () -> Unit,
+    onOpenSection: (String) -> Unit,
     onPlay: (List<TrackRow>, Int) -> Unit,
 ) {
     // Fresh Flow collection each composition entry so returning to Home after
     // downloads always picks up Room invalidations (not a stale empty snapshot).
-    val tracks by remember(container) { container.library.observeTracks() }
+    val tracks by remember(container) { container.library.observeTracksByAdded() }
         .collectAsState(initial = emptyList())
     val count by remember(container) { container.library.observeTrackCount() }
         .collectAsState(initial = 0)
+    var query by remember { mutableStateOf("") }
+    val filtered = remember(tracks, query) { tracks.filterByQuery(query) }
     val scope = rememberCoroutineScope()
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
-        ScreenTitle("MeloManiac")
-        Muted("Descargas a Telegram. Usá el icono de descarga para guardar offline.")
-        PrimaryButton("Explorar biblioteca", onClick = onBrowse)
+        ScreenTitle("Biblioteca")
+        Muted("Buscá un tema suelto o abrí playlists y favoritos.")
+        Spacer(Modifier.height(8.dp))
+        AppTextField(query, { query = it }, "Filtrar canciones…")
+        Spacer(Modifier.height(10.dp))
+        LibraryQuickChips(onBrowse = onBrowse, onOpenSection = onOpenSection)
+        Spacer(Modifier.height(12.dp))
         Text(
-            "Todas las canciones ($count)",
+            when {
+                query.isBlank() -> "Canciones ($count)"
+                else -> "${filtered.size} de $count"
+            },
             color = TextSecondary,
-            modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
+            modifier = Modifier.padding(bottom = 8.dp),
         )
         if (tracks.isEmpty()) {
             Muted("Todavía no hay temas. Usá Buscar para encolar YouTube o Spotify.")
+        } else if (filtered.isEmpty()) {
+            Muted("Ningún tema coincide con \"$query\".")
         } else {
             TrackList(
-                tracks = tracks,
+                tracks = filtered,
                 onPlay = onPlay,
                 onToggleFavorite = { id -> scope.launch { container.library.toggleFavorite(id) } },
                 onDelete = { id ->
@@ -96,6 +108,46 @@ fun LibraryHomeScreen(
                 },
             )
         }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LibraryQuickChips(
+    onBrowse: () -> Unit,
+    onOpenSection: (String) -> Unit,
+) {
+    val chips = listOf(
+        "playlists" to "Playlists",
+        "favorites" to "Favoritos",
+        "recent" to "Recientes",
+        "artists" to "Artistas",
+        "albums" to "Álbumes",
+    )
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        chips.forEach { (key, label) ->
+            FilterChip(
+                selected = false,
+                onClick = { onOpenSection(key) },
+                label = { Text(label) },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Surface,
+                    labelColor = TextSecondary,
+                ),
+            )
+        }
+        FilterChip(
+            selected = false,
+            onClick = onBrowse,
+            label = { Text("Más…") },
+            colors = FilterChipDefaults.filterChipColors(
+                containerColor = Surface,
+                labelColor = TextSecondary,
+            ),
+        )
     }
 }
 

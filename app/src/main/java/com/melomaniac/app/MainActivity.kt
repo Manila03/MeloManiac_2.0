@@ -207,8 +207,19 @@ fun MeloApp(
             NavHost(navController = nav, startDestination = "library") {
                 composable("library") {
                     LibraryHomeScreen(
-                        container,
+                        container = container,
                         onBrowse = { nav.navigate("browse") },
+                        onOpenSection = { key ->
+                            when (key) {
+                                "artists" -> nav.navigate("artists")
+                                "albums" -> nav.navigate("albums")
+                                "playlists" -> nav.navigate("playlists")
+                                "favorites" -> nav.navigate("favorites")
+                                "recent" -> nav.navigate("recent")
+                                "genres" -> nav.navigate("genres")
+                                "folders" -> nav.navigate("folders")
+                            }
+                        },
                         onPlay = ::play,
                     )
                 }

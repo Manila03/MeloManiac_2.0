@@ -10,7 +10,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,10 +37,21 @@ import com.melomaniac.app.ui.ScreenTitle
 import com.melomaniac.app.ui.SimpleListItem
 import com.melomaniac.app.ui.TrackList
 import com.melomaniac.app.ui.theme.Accent
+import com.melomaniac.app.ui.theme.TextMuted
 import com.melomaniac.app.util.AppBusy
 import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+
+internal fun List<TrackRow>.filterByQuery(query: String): List<TrackRow> {
+    val q = query.trim()
+    if (q.isEmpty()) return this
+    return filter { track ->
+        track.title.contains(q, ignoreCase = true) ||
+            track.artistName.orEmpty().contains(q, ignoreCase = true) ||
+            track.albumName.orEmpty().contains(q, ignoreCase = true)
+    }
+}
 
 @Composable
 private fun LibraryTrackList(
@@ -103,11 +118,49 @@ fun AlbumsScreen(container: AppContainer, onOpen: (String) -> Unit) {
 fun PlaylistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
     val playlists by container.library.observePlaylists().collectAsState(initial = emptyList())
     var name by remember { mutableStateOf("") }
+    var pendingDeleteId by remember { mutableStateOf<String?>(null) }
+    var pendingDeleteName by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
+    val globalBusy by AppBusy.message.collectAsState()
+    val pending = playlists.firstOrNull { it.id == pendingDeleteId }
+
+    if (pending != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingDeleteId = null },
+            title = { Text("Eliminar playlist") },
+            text = {
+                Text(
+                    "Se elimina \"$pendingDeleteName\" y los temas que solo pertenecen a esta playlist. " +
+                        "Los temas que también están en otras playlists se conservan.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val id = pending.id
+                        pendingDeleteId = null
+                        scope.launch {
+                            AppBusy.run("Eliminando playlist…") {
+                                val orphans = container.library.deletePlaylist(id)
+                                orphans.forEach { container.covers.deleteIfExists(it) }
+                            }
+                        }
+                    },
+                    enabled = globalBusy == null,
+                ) {
+                    Text("Eliminar", color = androidx.compose.material3.MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteId = null }) { Text("Cancelar") }
+            },
+        )
+    }
+
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Playlists")
         AppTextField(name, { name = it }, "Nueva playlist…")
-        PrimaryButton("Crear") {
+        PrimaryButton("Crear", enabled = globalBusy == null) {
             scope.launch {
                 if (name.isNotBlank()) {
                     container.library.createPlaylist(name)
@@ -115,9 +168,31 @@ fun PlaylistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
                 }
             }
         }
+        Spacer(Modifier.height(8.dp))
         LazyColumn {
             items(playlists, key = { it.id }) { p ->
-                SimpleListItem(p.name, "Tocá para abrir · editar o borrar adentro") { onOpen(p.id) }
+                SimpleListItem(
+                    title = p.name,
+                    subtitle = "Tocá para abrir",
+                    onClick = { onOpen(p.id) },
+                    trailing = {
+                        IconButton(
+                            onClick = {
+                                if (globalBusy == null) {
+                                    pendingDeleteName = p.name
+                                    pendingDeleteId = p.id
+                                }
+                            },
+                            enabled = globalBusy == null,
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Eliminar playlist",
+                                tint = TextMuted,
+                            )
+                        }
+                    },
+                )
             }
         }
     }
@@ -222,6 +297,7 @@ fun PlaylistDetailScreen(
     var editingName by remember { mutableStateOf(false) }
     var nameDraft by remember { mutableStateOf("") }
     var editingTracks by remember { mutableStateOf(false) }
+    var trackPickerQuery by remember { mutableStateOf("") }
     var confirmDelete by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val globalBusy by AppBusy.message.collectAsState()
@@ -289,7 +365,10 @@ fun PlaylistDetailScreen(
                 GhostButton(
                     if (editingTracks) "Listo" else "Editar temas",
                     modifier = Modifier.weight(1f),
-                ) { editingTracks = !editingTracks }
+                ) {
+                    editingTracks = !editingTracks
+                    if (!editingTracks) trackPickerQuery = ""
+                }
             }
             GhostButton("Eliminar playlist") {
                 if (globalBusy == null) confirmDelete = true
@@ -300,9 +379,17 @@ fun PlaylistDetailScreen(
         if (editingTracks) {
             Muted("Marcá para agregar o quitar temas de esta playlist (no borra de la biblioteca).")
             Spacer(Modifier.height(8.dp))
+            AppTextField(trackPickerQuery, { trackPickerQuery = it }, "Filtrar temas…")
+            Spacer(Modifier.height(8.dp))
             val inPlaylist = tracks.map { it.id }.toSet()
+            val pickerTracks = remember(allTracks, trackPickerQuery) {
+                allTracks.filterByQuery(trackPickerQuery)
+            }
+            if (pickerTracks.isEmpty()) {
+                Muted(if (trackPickerQuery.isBlank()) "No hay temas en la biblioteca." else "Sin coincidencias.")
+            }
             LazyColumn(Modifier.weight(1f)) {
-                items(allTracks, key = { it.id }) { track ->
+                items(pickerTracks, key = { it.id }) { track ->
                     val checked = track.id in inPlaylist
                     Row(
                         Modifier

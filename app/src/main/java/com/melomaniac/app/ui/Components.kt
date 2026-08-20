@@ -211,17 +211,32 @@ fun TrackList(
 }
 
 @Composable
-fun SimpleListItem(title: String, subtitle: String? = null, onClick: () -> Unit) {
+fun SimpleListItem(
+    title: String,
+    subtitle: String? = null,
+    onClick: () -> Unit,
+    trailing: (@Composable () -> Unit)? = null,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clickable(onClick = onClick),
+            .padding(vertical = 4.dp),
     ) {
-        Column(Modifier.padding(14.dp)) {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            if (subtitle != null) Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(start = 14.dp, top = 10.dp, bottom = 10.dp, end = if (trailing != null) 4.dp else 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.SemiBold)
+                if (subtitle != null) {
+                    Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            trailing?.invoke()
         }
     }
 }

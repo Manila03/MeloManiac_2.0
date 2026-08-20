@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 
 class LibraryRepository(private val dao: LibraryDao) {
     fun observeTracks() = dao.observeTracks()
+    fun observeTracksByAdded() = dao.observeTracksByAdded()
     fun observeArtists() = dao.observeArtists()
     fun observeAlbums() = dao.observeAlbums()
     fun observePlaylists() = dao.observePlaylists()
