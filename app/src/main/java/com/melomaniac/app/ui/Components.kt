@@ -16,8 +16,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -95,12 +100,16 @@ fun TrackList(
     onToggleFavorite: (String) -> Unit,
     onDelete: ((String) -> Unit)? = null,
     onDownloadLocal: ((String) -> Unit)? = null,
+    onAddToCollection: ((String) -> Unit)? = null,
+    onMoveUp: ((String) -> Unit)? = null,
+    onMoveDown: ((String) -> Unit)? = null,
+    emptyMessage: String = "Sin temas",
     deleteDialogTitle: String = "Borrar canción",
     deleteDialogText: ((TrackRow) -> String)? = null,
     deleteConfirmLabel: String = "Borrar",
 ) {
     if (tracks.isEmpty()) {
-        Text("Sin temas", color = TextMuted, modifier = Modifier.padding(24.dp))
+        Text(emptyMessage, color = TextMuted, modifier = Modifier.padding(24.dp))
         return
     }
     var pendingDeleteId by remember { mutableStateOf<String?>(null) }
@@ -179,6 +188,28 @@ fun TrackList(
                             )
                         }
                     }
+                    if (onMoveUp != null) {
+                        IconButton(onClick = { onMoveUp(track.id) }, enabled = index > 0) {
+                            Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Subir", tint = TextMuted)
+                        }
+                    }
+                    if (onMoveDown != null) {
+                        IconButton(
+                            onClick = { onMoveDown(track.id) },
+                            enabled = index < tracks.lastIndex,
+                        ) {
+                            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Bajar", tint = TextMuted)
+                        }
+                    }
+                    if (onAddToCollection != null) {
+                        IconButton(onClick = { onAddToCollection(track.id) }) {
+                            Icon(
+                                Icons.Default.PlaylistAdd,
+                                contentDescription = "Agregar a playlist",
+                                tint = Accent,
+                            )
+                        }
+                    }
                     if (onDownloadLocal != null && track.needsLocalDownload) {
                         IconButton(onClick = { onDownloadLocal(track.id) }) {
                             Icon(
@@ -214,8 +245,8 @@ fun TrackList(
 fun SimpleListItem(
     title: String,
     subtitle: String? = null,
-    onClick: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
+    onClick: () -> Unit,
 ) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Surface),
@@ -273,6 +304,8 @@ fun MiniPlayerBar(
     playing: Boolean,
     onToggle: () -> Unit,
     onOpen: () -> Unit,
+    onNext: (() -> Unit)? = null,
+    onPrev: (() -> Unit)? = null,
 ) {
     if (title == null) return
     Card(
@@ -289,8 +322,18 @@ fun MiniPlayerBar(
                 Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
                 Text(artist.orEmpty(), color = TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
             }
+            if (onPrev != null) {
+                IconButton(onClick = onPrev) {
+                    Icon(Icons.Default.SkipPrevious, null, tint = Accent)
+                }
+            }
             IconButton(onClick = onToggle) {
                 Icon(if (playing) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Accent)
+            }
+            if (onNext != null) {
+                IconButton(onClick = onNext) {
+                    Icon(Icons.Default.SkipNext, null, tint = Accent)
+                }
             }
         }
     }

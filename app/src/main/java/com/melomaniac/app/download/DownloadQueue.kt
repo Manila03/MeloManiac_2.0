@@ -38,10 +38,12 @@ class DownloadQueue(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
     private val commitMutex = Mutex()
+    private val telegramUploadMutex = Mutex()
     private var workers = 0
     private var running = false
     @Volatile private var resetGeneration = 0L
     private val inFlight = mutableSetOf<String>()
+    private val cancelledIds = mutableSetOf<String>()
     private val prefs by lazy {
         appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
@@ -196,8 +198,13 @@ class DownloadQueue(
                                 }
                             }
                             if (enqueued > 0) start()
+                            val partial = if (c.tracksMayBePartial) {
+                                " (parcial: solo ${c.tracks.size} temas del embed)"
+                            } else {
+                                ""
+                            }
                             return@withContext (enqueued + linked) to
-                                "Álbum Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola"
+                                "Álbum Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola$partial"
                         } else {
                             val playlist = library.createPlaylist(c.name, c.externalUrl)
                             var enqueued = 0
@@ -228,8 +235,13 @@ class DownloadQueue(
                                 }
                             }
                             if (enqueued > 0) start()
+                            val partial = if (c.tracksMayBePartial) {
+                                " (parcial: solo ${c.tracks.size} temas del embed)"
+                            } else {
+                                ""
+                            }
                             return@withContext (enqueued + linked) to
-                                "Playlist Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola"
+                                "Playlist Spotify \"${c.name}\": $enqueued nuevos, $linked ya en biblioteca/cola$partial"
                         }
                     }
                 }
@@ -594,24 +606,44 @@ class DownloadQueue(
         refreshForeground()
         try {
             var url = job.urlOrQuery
+            val existingTrackId = meta.optString("existingTrackId").ifBlank { null }
+            val targetLocal = meta.optString("targetStorage") == "local" && existingTrackId != null
             if (!LinkDetector.isYouTube(url) && !url.startsWith("ytsearch")) {
                 val title = meta.optString("title").ifBlank { url }
                 val artist = meta.optString("artist")
                 val query = "$title $artist".trim()
                 AppLog.i("Queue", "job=${job.id} matching YouTube: $query")
                 val hits = ytDlp.search(query, 6)
-                val best = hits.firstOrNull() ?: error("Sin coincidencia en YouTube")
+                val wantDuration = meta.optLong("durationMs")
+                val best = YtMatchScorer.pickBest(
+                    hits = hits,
+                    title = title,
+                    artist = artist,
+                    durationMs = wantDuration,
+                )
                 url = best.url
                 meta.put("youtubeId", best.id)
                 if (!meta.has("coverUrl") && !best.thumbnailUrl.isNullOrBlank()) {
                     meta.put("coverUrl", best.thumbnailUrl)
                 }
+                // Mid-resolve dedup: if this YouTube id already exists, link and finish.
+                val existingByYt = library.findTrackByIdentity(
+                    best.id,
+                    meta.optString("spotifyId").ifBlank { null },
+                )
+                if (existingByYt != null && !targetLocal) {
+                    val playlistIds = linkedPlaylistIds(meta)
+                    for (pid in playlistIds) library.addTrackToPlaylist(pid, existingByYt.id)
+                    commitIfCurrent(workerGeneration) {
+                        downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+                    }
+                    AppLog.i("Queue", "job=${job.id} dedup after YT match → ${existingByYt.id}")
+                    return
+                }
             }
-            // Telegram/online path always uses m4a (YouTube isn't lossless; HLS re-encodes to AAC anyway).
-            // Local attach still honors the FLAC setting.
-            val existingTrackId = meta.optString("existingTrackId").ifBlank { null }
-            val targetLocal = meta.optString("targetStorage") == "local" && existingTrackId != null
-            val preferFlac = if (targetLocal) settings.preferFlac else false
+            // Telegram/online path always uses m4a unless preferLocalStorage (then honor FLAC).
+            val preferLocal = settings.preferLocalStorage && !targetLocal
+            val preferFlac = if (targetLocal || preferLocal) settings.preferFlac else false
             val result = ytDlp.downloadAudio(
                 urlOrQuery = url,
                 jobId = job.id,
@@ -632,9 +664,9 @@ class DownloadQueue(
                     }
                 },
             )
-            if (workerGeneration != resetGeneration) {
+            if (workerGeneration != resetGeneration || isCancelled(job.id)) {
                 result.file.delete()
-                AppLog.i("Queue", "discarded stale job=${job.id} after reset")
+                AppLog.i("Queue", "discarded stale/cancelled job=${job.id} after reset")
                 return
             }
             val youtubeId = meta.optString("youtubeId").ifBlank { null } ?: result.youtubeId
@@ -642,7 +674,7 @@ class DownloadQueue(
                 ?: youtubeId
                 ?: job.id
 
-            if (!targetLocal && !settings.isTelegramConfigured) {
+            if (!targetLocal && !preferLocal && !settings.isTelegramConfigured) {
                 result.file.delete()
                 error("Configurá Telegram en Ajustes antes de descargar")
             }
@@ -653,15 +685,23 @@ class DownloadQueue(
                 youtubeId = youtubeId,
             )
 
-            if (targetLocal) {
-                processLocalAttach(
+            when {
+                targetLocal -> processLocalAttach(
                     job = job,
                     workerGeneration = workerGeneration,
                     result = result,
                     existingTrackId = existingTrackId!!,
                 )
-            } else {
-                processOnline(
+                preferLocal -> processLocalNew(
+                    job = job,
+                    workerGeneration = workerGeneration,
+                    result = result,
+                    meta = meta,
+                    url = url,
+                    youtubeId = youtubeId,
+                    coverPath = coverFile?.absolutePath,
+                )
+                else -> processOnline(
                     job = job,
                     workerGeneration = workerGeneration,
                     result = result,
@@ -673,10 +713,108 @@ class DownloadQueue(
             }
         } catch (e: Exception) {
             AppLog.e("Queue", "failed job=${job.id}", e)
-            commitIfCurrent(workerGeneration) {
-                downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
+            if (isCancelled(job.id)) {
+                commitIfCurrent(workerGeneration) {
+                    downloadDao.update(job.id, "cancelled", 0f, "Cancelado", System.currentTimeMillis())
+                }
+                clearCancelled(job.id)
+                return
+            }
+            val attempts = meta.optInt("attempts", 0) + 1
+            meta.put("attempts", attempts)
+            val transient = isTransientError(e)
+            if (transient && attempts < MAX_ATTEMPTS) {
+                val waitMs = (1_000L * (1 shl (attempts - 1).coerceAtMost(4)))
+                AppLog.w("Queue", "job=${job.id} transient fail attempt=$attempts; retry in ${waitMs}ms")
+                commitIfCurrent(workerGeneration) {
+                    downloadDao.updateMeta(job.id, meta.toString(), System.currentTimeMillis())
+                    downloadDao.update(
+                        job.id,
+                        "queued",
+                        0f,
+                        "Reintento $attempts/$MAX_ATTEMPTS: ${e.message}",
+                        System.currentTimeMillis(),
+                    )
+                }
+                delay(waitMs)
+                start()
+            } else {
+                commitIfCurrent(workerGeneration) {
+                    downloadDao.update(job.id, "failed", 0f, e.message, System.currentTimeMillis())
+                }
             }
         }
+    }
+
+    private fun isTransientError(e: Exception): Boolean {
+        val msg = (e.message ?: "").lowercase()
+        return msg.contains("429") ||
+            msg.contains("403") ||
+            msg.contains("timeout") ||
+            msg.contains("timed out") ||
+            msg.contains("unable to connect") ||
+            msg.contains("network") ||
+            msg.contains("connection") ||
+            msg.contains("temporarily") ||
+            msg.contains("http 5")
+    }
+
+    private fun isCancelled(id: String): Boolean = synchronized(cancelledIds) { id in cancelledIds }
+
+    private fun clearCancelled(id: String) {
+        synchronized(cancelledIds) { cancelledIds.remove(id) }
+    }
+
+    suspend fun cancel(id: String) {
+        synchronized(cancelledIds) { cancelledIds += id }
+        mutex.withLock { inFlight.remove(id) }
+        downloadDao.update(id, "cancelled", 0f, "Cancelado", System.currentTimeMillis())
+        AppLog.i("Queue", "cancelled job=$id")
+    }
+
+    private suspend fun processLocalNew(
+        job: DownloadJobEntity,
+        workerGeneration: Long,
+        result: DownloadResult,
+        meta: JSONObject,
+        url: String,
+        youtubeId: String?,
+        coverPath: String?,
+    ) {
+        val playlistIds = linkedPlaylistIds(meta)
+        val committed = commitIfCurrent(workerGeneration) {
+            library.insertDownloadedTrack(
+                title = meta.optString("title").ifBlank { result.title },
+                artistName = meta.optString("artist").ifBlank { null } ?: result.artist,
+                albumName = meta.optString("albumName").ifBlank { null },
+                albumId = meta.optString("albumId").ifBlank { null },
+                playlistId = playlistIds.firstOrNull(),
+                path = result.file.absolutePath,
+                format = result.format,
+                durationMs = when {
+                    result.durationMs > 0 -> result.durationMs
+                    meta.optLong("durationMs") > 0 -> meta.optLong("durationMs")
+                    else -> 0L
+                },
+                sourceUrl = url,
+                sourceType = if (meta.has("spotifyId")) "spotify" else "youtube",
+                spotifyId = meta.optString("spotifyId").ifBlank { null },
+                youtubeId = youtubeId,
+                genre = null,
+                coverPath = coverPath,
+                storageMode = TrackEntity.STORAGE_LOCAL,
+                playlistIds = playlistIds,
+            )
+            meta.remove("uploadedSegments")
+            downloadDao.updateMeta(job.id, meta.toString(), System.currentTimeMillis())
+            downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
+        }
+        if (!committed) {
+            result.file.delete()
+            AppLog.i("Queue", "discarded stale local-new job=${job.id}")
+            return
+        }
+        AppLog.i("Queue", "local-new job=${job.id} → ${result.file.name}")
     }
 
     private suspend fun processLocalAttach(
@@ -748,30 +886,38 @@ class DownloadQueue(
             commitIfCurrent(workerGeneration) {
                 downloadDao.update(job.id, "running", 85f, null, System.currentTimeMillis())
             }
-            val uploaded = mutableListOf<TrackSegmentEntity>()
+            val uploaded = loadUploadedCheckpoint(meta).toMutableList()
+            val doneIndexes = uploaded.map { it.segmentIndex }.toHashSet()
             val total = packed.segments.size.coerceAtLeast(1)
             for (seg in packed.segments) {
-                if (workerGeneration != resetGeneration) {
+                if (seg.index in doneIndexes) continue
+                if (workerGeneration != resetGeneration || isCancelled(job.id)) {
                     result.file.delete()
                     packed.deleteQuietly()
-                    AppLog.i("Queue", "discarded stale online job=${job.id} mid-upload")
+                    AppLog.i("Queue", "discarded stale/cancelled online job=${job.id} mid-upload")
                     return
                 }
-                val ext = seg.file.extension.ifBlank { if (packed.progressive) result.format else "ts" }
-                val ref = client.sendDocument(
-                    chatId = chatId,
-                    file = seg.file,
-                    caption = "mm:${job.id}:${seg.index}",
-                    fileName = "seg_${seg.index.toString().padStart(5, '0')}.$ext",
-                )
-                uploaded += TrackSegmentEntity(
-                    trackId = "",
-                    segmentIndex = seg.index,
-                    telegramFileId = ref.fileId,
-                    durationSec = seg.durationSec,
-                    byteSize = ref.fileSize ?: seg.file.length(),
-                )
-                val progress = 85f + (15f * (seg.index + 1) / total)
+                telegramUploadMutex.withLock {
+                    val ext = seg.file.extension.ifBlank { if (packed.progressive) result.format else "ts" }
+                    val ref = client.sendDocument(
+                        chatId = chatId,
+                        file = seg.file,
+                        caption = "mm:${job.id}:${seg.index}",
+                        fileName = "seg_${seg.index.toString().padStart(5, '0')}.$ext",
+                    )
+                    val entity = TrackSegmentEntity(
+                        trackId = "",
+                        segmentIndex = seg.index,
+                        telegramFileId = ref.fileId,
+                        durationSec = seg.durationSec,
+                        byteSize = ref.fileSize ?: seg.file.length(),
+                    )
+                    uploaded += entity
+                    doneIndexes += seg.index
+                    saveUploadedCheckpoint(job.id, meta, uploaded)
+                    delay(UPLOAD_GAP_MS)
+                }
+                val progress = 85f + (15f * (doneIndexes.size) / total)
                 commitIfCurrent(workerGeneration) {
                     downloadDao.update(
                         job.id,
@@ -780,10 +926,6 @@ class DownloadQueue(
                         null,
                         System.currentTimeMillis(),
                     )
-                }
-                // Pace uploads to reduce Telegram flood waits (still retries on 429).
-                if (seg.index + 1 < total) {
-                    delay(UPLOAD_GAP_MS)
                 }
             }
             val trackFormat = if (packed.progressive) result.format else "hls"
@@ -809,9 +951,11 @@ class DownloadQueue(
                     genre = null,
                     coverPath = coverPath,
                     storageMode = TrackEntity.STORAGE_TELEGRAM,
-                    segments = uploaded,
+                    segments = uploaded.sortedBy { it.segmentIndex },
                     playlistIds = playlistIds,
                 )
+                meta.remove("uploadedSegments")
+                downloadDao.updateMeta(job.id, meta.toString(), System.currentTimeMillis())
                 downloadDao.update(job.id, "done", 100f, null, System.currentTimeMillis())
             }
             if (!committed) {
@@ -833,6 +977,41 @@ class DownloadQueue(
         }
     }
 
+    private fun loadUploadedCheckpoint(meta: JSONObject): List<TrackSegmentEntity> {
+        val arr = meta.optJSONArray("uploadedSegments") ?: return emptyList()
+        val out = ArrayList<TrackSegmentEntity>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            out += TrackSegmentEntity(
+                trackId = "",
+                segmentIndex = o.optInt("index"),
+                telegramFileId = o.optString("fileId"),
+                durationSec = o.optDouble("durationSec"),
+                byteSize = if (o.has("byteSize")) o.optLong("byteSize") else null,
+            )
+        }
+        return out.filter { it.telegramFileId.isNotBlank() }
+    }
+
+    private suspend fun saveUploadedCheckpoint(
+        jobId: String,
+        meta: JSONObject,
+        uploaded: List<TrackSegmentEntity>,
+    ) {
+        val arr = org.json.JSONArray()
+        for (s in uploaded) {
+            arr.put(
+                JSONObject()
+                    .put("index", s.segmentIndex)
+                    .put("fileId", s.telegramFileId)
+                    .put("durationSec", s.durationSec)
+                    .put("byteSize", s.byteSize),
+            )
+        }
+        meta.put("uploadedSegments", arr)
+        downloadDao.updateMeta(jobId, meta.toString(), System.currentTimeMillis())
+    }
+
     private suspend fun commitIfCurrent(
         workerGeneration: Long,
         block: suspend () -> Unit,
@@ -845,6 +1024,7 @@ class DownloadQueue(
     companion object {
         /** Pause between Telegram segment uploads to reduce flood control. */
         private const val UPLOAD_GAP_MS = 400L
+        private const val MAX_ATTEMPTS = 3
         private const val PREFS_NAME = "melomaniac_downloads"
         private const val PREF_QUEUE_PAUSED = "queue_paused"
     }

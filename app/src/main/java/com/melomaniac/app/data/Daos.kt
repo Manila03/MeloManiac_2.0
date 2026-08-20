@@ -218,6 +218,9 @@ interface LibraryDao {
     @Query("SELECT * FROM playlists WHERE id = :id")
     suspend fun getPlaylist(id: String): PlaylistEntity?
 
+    @Query("SELECT * FROM playlists WHERE sourceUrl = :sourceUrl LIMIT 1")
+    suspend fun findPlaylistBySourceUrl(sourceUrl: String): PlaylistEntity?
+
     @Query("SELECT * FROM genres WHERE id = :id")
     suspend fun getGenre(id: String): GenreEntity?
 
@@ -244,6 +247,21 @@ interface LibraryDao {
 
     @Query("UPDATE playlists SET name = :name WHERE id = :id")
     suspend fun renamePlaylist(id: String, name: String)
+
+    @Query("UPDATE folders SET name = :name WHERE id = :id")
+    suspend fun renameFolder(id: String, name: String)
+
+    @Query("DELETE FROM folders WHERE id = :id")
+    suspend fun deleteFolderRow(id: String)
+
+    @Query("DELETE FROM folder_tracks WHERE folderId = :folderId AND trackId = :trackId")
+    suspend fun removeFolderTrack(folderId: String, trackId: String)
+
+    @Query("SELECT trackId FROM folder_tracks WHERE folderId = :folderId")
+    suspend fun trackIdsInFolder(folderId: String): List<String>
+
+    @Query("UPDATE playlist_tracks SET position = :position WHERE playlistId = :playlistId AND trackId = :trackId")
+    suspend fun updatePlaylistTrackPosition(playlistId: String, trackId: String, position: Int)
 
     @Query("DELETE FROM playlists WHERE id = :id")
     suspend fun deletePlaylistRow(id: String)
@@ -332,6 +350,9 @@ interface DownloadDao {
 
     @Query("UPDATE download_jobs SET status = :status, progress = :progress, error = :error, updatedAt = :updatedAt WHERE id = :id")
     suspend fun update(id: String, status: String, progress: Float, error: String?, updatedAt: Long)
+
+    @Query("UPDATE download_jobs SET metaJson = :metaJson, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateMeta(id: String, metaJson: String, updatedAt: Long)
 
     @Query("UPDATE download_jobs SET status = 'queued', progress = 0, error = NULL, updatedAt = :updatedAt WHERE status = 'running'")
     suspend fun resetStuck(updatedAt: Long)

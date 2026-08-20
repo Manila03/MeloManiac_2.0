@@ -17,6 +17,8 @@ data class SpotifyCollection(
     val coverUrl: String?,
     val externalUrl: String,
     val tracks: List<SpotifyTrackMeta>,
+    /** True when Pathfinder failed and embed may have truncated the list. */
+    val tracksMayBePartial: Boolean = false,
 )
 
 sealed class SpotifyResolve {

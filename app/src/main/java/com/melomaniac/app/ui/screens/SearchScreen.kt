@@ -15,6 +15,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,6 +24,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -44,7 +46,9 @@ import com.melomaniac.app.ui.theme.Surface
 import com.melomaniac.app.ui.theme.TextSecondary
 import com.melomaniac.app.util.AppBusy
 import com.melomaniac.app.util.AppLog
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 
 @Composable
 fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit) {
@@ -52,12 +56,38 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
     var message by remember { mutableStateOf<String?>(null) }
     var local by remember { mutableStateOf<List<TrackRow>>(emptyList()) }
     var youtubeHits by remember { mutableStateOf<List<YtHit>>(emptyList()) }
+    var history by remember { mutableStateOf<List<String>>(emptyList()) }
     val scope = rememberCoroutineScope()
     val globalBusy by AppBusy.message.collectAsState()
+    val context = LocalContext.current
+    val prefs = remember {
+        context.getSharedPreferences("melomaniac_search", android.content.Context.MODE_PRIVATE)
+    }
     val detected = remember(query) { LinkDetector.classify(query.trim()) }
     val isLink = detected != null ||
         query.trim().startsWith("spotify:") ||
         query.trim().contains("http", ignoreCase = true)
+
+    LaunchedEffect(Unit) {
+        history = loadHistory(prefs)
+    }
+
+    // Debounced library-only search while typing (not for links).
+    LaunchedEffect(query) {
+        val q = query.trim()
+        if (q.isEmpty() || isLink) {
+            if (q.isEmpty()) local = emptyList()
+            return@LaunchedEffect
+        }
+        delay(280)
+        local = runCatching { container.library.search(q) }.getOrDefault(emptyList())
+    }
+
+    fun rememberQuery(q: String) {
+        val next = (listOf(q) + history.filter { !it.equals(q, true) }).take(8)
+        history = next
+        saveHistory(prefs, next)
+    }
 
     Column(
         Modifier
@@ -66,7 +96,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
             .verticalScroll(rememberScrollState()),
     ) {
         ScreenTitle("Buscar")
-        Muted("Escribí un tema/artista, o pegá un link de YouTube/Spotify.")
+        Muted("Escribí un tema/artista (biblioteca al instante), o pegá un link / tocá Buscar para YouTube.")
         AppTextField(query, { query = it }, "URL o búsqueda…")
         when (detected) {
             "spotify" -> {
@@ -83,7 +113,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
             }
         }
         PrimaryButton(
-            if (isLink) "Encolar link" else "Buscar",
+            if (isLink) "Encolar link" else "Buscar en YouTube",
             onClick = {
                 scope.launch {
                     message = null
@@ -95,7 +125,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                             when {
                                 detected == "spotify" -> "Resolviendo Spotify…"
                                 isLink -> "Encolando…"
-                                else -> "Buscando…"
+                                else -> "Buscando en YouTube…"
                             },
                         ) {
                             if (isLink) {
@@ -103,6 +133,7 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
                                 message = msg
                                 local = emptyList()
                             } else {
+                                rememberQuery(q)
                                 local = container.library.search(q)
                                 youtubeHits = container.ytDlp.search(q, 8)
                                 message = when {
@@ -123,6 +154,19 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
             },
             enabled = globalBusy == null && query.isNotBlank(),
         )
+        if (!isLink && history.isNotEmpty() && query.isBlank()) {
+            Text("Recientes", color = TextSecondary, modifier = Modifier.padding(top = 8.dp))
+            history.forEach { h ->
+                Text(
+                    h,
+                    color = Accent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { query = h }
+                        .padding(vertical = 6.dp),
+                )
+            }
+        }
         if (!isLink && youtubeHits.isNotEmpty()) {
             GhostButton("Encolar el primero de YouTube", onClick = {
                 scope.launch {
@@ -222,4 +266,20 @@ fun SearchScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
             }
         }
     }
+}
+
+private fun loadHistory(prefs: android.content.SharedPreferences): List<String> {
+    val raw = prefs.getString("history", "[]") ?: "[]"
+    return runCatching {
+        val arr = JSONArray(raw)
+        buildList {
+            for (i in 0 until arr.length()) add(arr.getString(i))
+        }
+    }.getOrDefault(emptyList())
+}
+
+private fun saveHistory(prefs: android.content.SharedPreferences, items: List<String>) {
+    val arr = JSONArray()
+    items.forEach { arr.put(it) }
+    prefs.edit().putString("history", arr.toString()).apply()
 }

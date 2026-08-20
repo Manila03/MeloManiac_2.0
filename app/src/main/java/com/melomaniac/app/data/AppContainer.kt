@@ -29,13 +29,14 @@ class AppContainer(context: Context) {
     val musicDir = File(appContext.filesDir, "music").also { if (!it.exists()) it.mkdirs() }
     private val coversDir = File(appContext.filesDir, "covers").also { if (!it.exists()) it.mkdirs() }
     private val hlsStagingDir = File(appContext.cacheDir, "hls-staging").also { if (!it.exists()) it.mkdirs() }
+    private val hlsProxyCacheDir = File(appContext.cacheDir, "hls-proxy").also { if (!it.exists()) it.mkdirs() }
 
     val ytDlp = YtDlpRunner(binaryManager, musicDir)
     val spotify = SpotifyScraper(appContext)
     val covers = CoverStore(appContext)
     val telegramConfig = TelegramConfig(settings)
     val hlsPackager = HlsPackager(appContext, binaryManager, hlsStagingDir)
-    val hlsProxy = HlsProxyServer(library, settings)
+    val hlsProxy = HlsProxyServer(library, settings, hlsProxyCacheDir)
 
     val downloadQueue = DownloadQueue(
         appContext = appContext,

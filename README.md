@@ -1,6 +1,6 @@
 # MeloManiac 2.0 (Kotlin nativo)
 
-App Android personal para buscar, descargar y reproducir música offline en FLAC.
+App Android personal para buscar, descargar y reproducir música. Por defecto el audio se guarda en Telegram (HLS/AAC) y se reproduce vía proxy local; opcionalmente podés guardar archivos en el teléfono (incl. FLAC).
 
 ## Stack
 
@@ -8,11 +8,13 @@ App Android personal para buscar, descargar y reproducir música offline en FLAC
 - Room (SQLite)
 - Media3 (reproductor + notificación)
 - yt-dlp + ffmpeg vía [youtubedl-android](https://github.com/yausername/youtubedl-android) (binarios nativos Android)
+- Telegram Bot API (almacenamiento online de segmentos)
 
 ## Requisitos
 
 - Android Studio / SDK
 - Teléfono arm64
+- Bot de Telegram + canal (salvo modo “solo local” en Ajustes)
 
 ## Build APK (un comando)
 

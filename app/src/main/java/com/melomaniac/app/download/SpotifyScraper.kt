@@ -102,53 +102,120 @@ class SpotifyScraper(
 
     /**
      * El embed SSR suele devolver como máximo [EMBED_TRACK_CAP] temas.
-     * Para playlists, completa con Pathfinder usando el accessToken anónimo del HTML.
+     * Playlists y álbumes se completan con Pathfinder usando el accessToken anónimo del HTML.
      */
     private fun finalizeResolve(result: SpotifyResolve, html: String): SpotifyResolve {
         if (result !is SpotifyResolve.Collection) return result
         val c = result.collection
-        if (c.type != "playlist") return result
+        if (c.type != "playlist" && c.type != "album") return result
 
         val token = extractAccessToken(html)
         if (token.isNullOrBlank()) {
             if (c.tracks.size >= EMBED_TRACK_CAP) {
-                AppLog.w(TAG, "playlist may be truncated at ${c.tracks.size} (sin accessToken)")
+                AppLog.w(TAG, "${c.type} may be truncated at ${c.tracks.size} (sin accessToken)")
+                return SpotifyResolve.Collection(c.copy(tracksMayBePartial = true))
             }
             return result
         }
 
+        val discoveredHashes = discoverPathfinderHashes(html)
         return try {
-            val (pathName, pathTracks) = fetchAllPlaylistTracks(token, c.id)
+            val (pathName, pathTracks) = when (c.type) {
+                "playlist" -> fetchAllPlaylistTracks(token, c.id, discoveredHashes)
+                else -> fetchAllAlbumTracks(token, c.id, discoveredHashes)
+            }
             if (pathTracks.isEmpty()) {
                 AppLog.w(TAG, "pathfinder returned 0 tracks; keeping embed (${c.tracks.size})")
-                return result
+                return if (c.tracks.size >= EMBED_TRACK_CAP) {
+                    SpotifyResolve.Collection(c.copy(tracksMayBePartial = true))
+                } else {
+                    result
+                }
             }
             AppLog.i(
                 TAG,
-                "pathfinder playlist ${c.id}: ${pathTracks.size} tracks " +
+                "pathfinder ${c.type} ${c.id}: ${pathTracks.size} tracks " +
                     "(embed had ${c.tracks.size})",
             )
             SpotifyResolve.Collection(
                 c.copy(
                     name = pathName?.takeIf { it.isNotBlank() } ?: c.name,
                     tracks = pathTracks,
+                    tracksMayBePartial = false,
                 ),
             )
         } catch (e: Exception) {
             AppLog.w(TAG, "pathfinder failed, keeping embed: ${e.message}")
             if (c.tracks.size >= EMBED_TRACK_CAP) {
-                AppLog.w(TAG, "playlist may be truncated at ${c.tracks.size}")
+                AppLog.w(TAG, "${c.type} parcial: solo ${c.tracks.size} temas del embed")
+                SpotifyResolve.Collection(c.copy(tracksMayBePartial = true))
+            } else {
+                result
             }
-            result
         }
     }
 
     private fun extractAccessToken(html: String): String? =
         Regex(""""accessToken"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
 
+    /** Pull candidate sha256 hashes near fetchPlaylist / getAlbum from HTML or linked JS. */
+    private fun discoverPathfinderHashes(html: String): List<String> {
+        val found = LinkedHashSet<String>()
+        Regex("""fetchPlaylist["'\s\S]{0,120}?([a-f0-9]{64})""").findAll(html).forEach {
+            found += it.groupValues[1]
+        }
+        Regex("""getAlbum["'\s\S]{0,120}?([a-f0-9]{64})""").findAll(html).forEach {
+            found += it.groupValues[1]
+        }
+        Regex(""""sha256Hash"\s*:\s*"([a-f0-9]{64})"""").findAll(html).forEach {
+            found += it.groupValues[1]
+        }
+        // Fetch a couple of player JS bundles referenced by the page.
+        val scriptSrcs = Regex("""<script[^>]+src="(https://[^"]+)"[^>]*>""")
+            .findAll(html)
+            .map { it.groupValues[1] }
+            .filter { it.contains("web-player", ignoreCase = true) || it.contains("embed", ignoreCase = true) }
+            .take(3)
+            .toList()
+        for (src in scriptSrcs) {
+            runCatching {
+                val js = fetchHtml(src)
+                Regex("""fetchPlaylist["'\s\S]{0,200}?([a-f0-9]{64})""").findAll(js).forEach {
+                    found += it.groupValues[1]
+                }
+                Regex("""getAlbum["'\s\S]{0,200}?([a-f0-9]{64})""").findAll(js).forEach {
+                    found += it.groupValues[1]
+                }
+            }.onFailure { AppLog.w(TAG, "hash discover from $src: ${it.message}") }
+        }
+        return found.toList()
+    }
+
     private fun fetchAllPlaylistTracks(
         accessToken: String,
         playlistId: String,
+        discoveredHashes: List<String>,
+    ): Pair<String?, List<SpotifyTrackMeta>> {
+        val hashes = (listOf(playlistHash) + discoveredHashes + PATHFINDER_PLAYLIST_HASH_FALLBACKS)
+            .distinct()
+        var lastError: Exception? = null
+        for (hash in hashes) {
+            try {
+                return paginatePlaylist(accessToken, playlistId, hash).also {
+                    playlistHash = hash
+                }
+            } catch (e: Exception) {
+                lastError = e
+                AppLog.w(TAG, "playlist hash ${hash.take(12)}… failed: ${e.message}")
+            }
+        }
+        throw lastError ?: error("pathfinder playlist failed")
+    }
+
+    private fun paginatePlaylist(
+        accessToken: String,
+        playlistId: String,
+        hash: String,
     ): Pair<String?, List<SpotifyTrackMeta>> {
         val out = ArrayList<SpotifyTrackMeta>()
         val seen = HashSet<String>()
@@ -159,7 +226,16 @@ class SpotifyScraper(
 
         while (pages < PATHFINDER_MAX_PAGES) {
             pages++
-            val page = pathfinderPlaylistPage(accessToken, playlistId, offset, PATHFINDER_PAGE_SIZE)
+            val page = pathfinderQuery(
+                accessToken = accessToken,
+                operationName = "fetchPlaylist",
+                hash = hash,
+                variables = JSONObject()
+                    .put("uri", "spotify:playlist:$playlistId")
+                    .put("offset", offset)
+                    .put("limit", PATHFINDER_PAGE_SIZE)
+                    .put("enableWatchFeedEntrypoint", false),
+            )
             val pl = page.optJSONObject("data")?.optJSONObject("playlistV2")
                 ?: error("pathfinder sin playlistV2")
             if (playlistName == null) {
@@ -183,36 +259,101 @@ class SpotifyScraper(
             if (total != null && offset >= total) break
         }
 
-        AppLog.i(
-            TAG,
-            "pathfinder pages=$pages collected=${out.size} totalCount=${total ?: "?"}",
-        )
+        AppLog.i(TAG, "pathfinder pages=$pages collected=${out.size} totalCount=${total ?: "?"}")
         return playlistName to out
     }
 
-    private fun pathfinderPlaylistPage(
+    private fun fetchAllAlbumTracks(
         accessToken: String,
-        playlistId: String,
-        offset: Int,
-        limit: Int,
+        albumId: String,
+        discoveredHashes: List<String>,
+    ): Pair<String?, List<SpotifyTrackMeta>> {
+        val hashes = (listOf(albumHash) + discoveredHashes + PATHFINDER_ALBUM_HASH_FALLBACKS)
+            .distinct()
+        var lastError: Exception? = null
+        for (hash in hashes) {
+            try {
+                return paginateAlbum(accessToken, albumId, hash).also {
+                    albumHash = hash
+                }
+            } catch (e: Exception) {
+                lastError = e
+                AppLog.w(TAG, "album hash ${hash.take(12)}… failed: ${e.message}")
+            }
+        }
+        throw lastError ?: error("pathfinder album failed")
+    }
+
+    private fun paginateAlbum(
+        accessToken: String,
+        albumId: String,
+        hash: String,
+    ): Pair<String?, List<SpotifyTrackMeta>> {
+        val out = ArrayList<SpotifyTrackMeta>()
+        val seen = HashSet<String>()
+        var offset = 0
+        var total: Int? = null
+        var albumName: String? = null
+        var pages = 0
+
+        while (pages < PATHFINDER_MAX_PAGES) {
+            pages++
+            val page = pathfinderQuery(
+                accessToken = accessToken,
+                operationName = "getAlbum",
+                hash = hash,
+                variables = JSONObject()
+                    .put("uri", "spotify:album:$albumId")
+                    .put("locale", "")
+                    .put("offset", offset)
+                    .put("limit", PATHFINDER_PAGE_SIZE),
+            )
+            val album = page.optJSONObject("data")?.optJSONObject("albumUnion")
+                ?: error("pathfinder sin albumUnion")
+            if (albumName == null) {
+                albumName = album.optString("name").takeIf { it.isNotBlank() }
+            }
+            val tracksV2 = album.optJSONObject("tracksV2")
+                ?: error("pathfinder sin tracksV2")
+            if (total == null && tracksV2.has("totalCount")) {
+                total = tracksV2.optInt("totalCount")
+            }
+            val items = tracksV2.optJSONArray("items") ?: JSONArray()
+            if (items.length() == 0) break
+
+            for (i in 0 until items.length()) {
+                val track = mapPathfinderAlbumItem(
+                    items.optJSONObject(i) ?: continue,
+                    albumName,
+                ) ?: continue
+                if (seen.add(track.id)) out += track
+            }
+
+            offset += PATHFINDER_PAGE_SIZE
+            if (items.length() < PATHFINDER_PAGE_SIZE) break
+            if (total != null && offset >= total) break
+        }
+
+        AppLog.i(TAG, "album pathfinder pages=$pages collected=${out.size} totalCount=${total ?: "?"}")
+        return albumName to out
+    }
+
+    private fun pathfinderQuery(
+        accessToken: String,
+        operationName: String,
+        hash: String,
+        variables: JSONObject,
     ): JSONObject {
         val bodyJson = JSONObject()
-            .put("operationName", "fetchPlaylist")
-            .put(
-                "variables",
-                JSONObject()
-                    .put("uri", "spotify:playlist:$playlistId")
-                    .put("offset", offset)
-                    .put("limit", limit)
-                    .put("enableWatchFeedEntrypoint", false),
-            )
+            .put("operationName", operationName)
+            .put("variables", variables)
             .put(
                 "extensions",
                 JSONObject().put(
                     "persistedQuery",
                     JSONObject()
                         .put("version", 1)
-                        .put("sha256Hash", PATHFINDER_PLAYLIST_HASH),
+                        .put("sha256Hash", hash),
                 ),
             )
             .toString()
@@ -251,6 +392,40 @@ class SpotifyScraper(
             }
         }
         error(lastError ?: "pathfinder request failed")
+    }
+
+    private fun mapPathfinderAlbumItem(item: JSONObject, albumFallback: String?): SpotifyTrackMeta? {
+        val track = item.optJSONObject("track") ?: return null
+        val uri = track.optString("uri")
+        val id = when {
+            uri.startsWith("spotify:track:") -> uri.removePrefix("spotify:track:")
+            else -> track.optString("id")
+        }
+        if (id.isBlank()) return null
+        val name = track.optString("name")
+        if (name.isBlank()) return null
+        val artists = mutableListOf<String>()
+        val artistItems = track.optJSONObject("artists")?.optJSONArray("items")
+        if (artistItems != null) {
+            for (i in 0 until artistItems.length()) {
+                artistItems.optJSONObject(i)
+                    ?.optJSONObject("profile")
+                    ?.optString("name")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { artists += it }
+            }
+        }
+        val durationMs = track.optJSONObject("duration")?.optLong("totalMilliseconds")
+            ?: track.optLong("durationMs")
+        return SpotifyTrackMeta(
+            id = id,
+            name = name,
+            artists = artists,
+            albumName = albumFallback.orEmpty(),
+            durationMs = durationMs,
+            coverUrl = null,
+            externalUrl = "https://open.spotify.com/track/$id",
+        )
     }
 
     private fun mapPathfinderPlaylistItem(item: JSONObject): SpotifyTrackMeta? {
@@ -589,8 +764,13 @@ class SpotifyScraper(
         private const val PATHFINDER_PAGE_SIZE = 100
         /** Spotify playlist maximum is 10_000 tracks. */
         private const val PATHFINDER_MAX_PAGES = 100
-        private const val PATHFINDER_PLAYLIST_HASH =
-            "7982b11e21535cd2594badc40030b745671b61a1fa66766e569d45e6364f3422"
+        private val PATHFINDER_PLAYLIST_HASH_FALLBACKS = listOf(
+            "7982b11e21535cd2594badc40030b745671b61a1fa66766e569d45e6364f3422",
+            "346811f856fb0b7e4f6c59f8ebea78dd081c6e2fb01b77c954b26259d5fc6763",
+        )
+        private val PATHFINDER_ALBUM_HASH_FALLBACKS = listOf(
+            "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10",
+        )
         private val PATHFINDER_URLS = listOf(
             "https://api-partner.spotify.com/pathfinder/v1/query",
             "https://api-partner.spotify.com/pathfinder/v2/query",
@@ -599,6 +779,12 @@ class SpotifyScraper(
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+        @Volatile
+        private var playlistHash: String = PATHFINDER_PLAYLIST_HASH_FALLBACKS.first()
+
+        @Volatile
+        private var albumHash: String = PATHFINDER_ALBUM_HASH_FALLBACKS.first()
     }
 }
 

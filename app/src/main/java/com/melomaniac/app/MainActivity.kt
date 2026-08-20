@@ -15,7 +15,6 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -144,9 +143,7 @@ fun MeloApp(
     val selectedTab = when {
         route == "search" -> "search"
         route == "downloads" -> "downloads"
-        route == "logs" -> "logs"
-        route == "settings" -> "settings"
-        // Biblioteca home + explorar + detalles (+ nowPlaying from library flow)
+        route == "settings" || route == "logs" -> "settings"
         else -> "library"
     }
     val busyMessage by AppBusy.message.collectAsState()
@@ -168,6 +165,8 @@ fun MeloApp(
                         playing = playerState.playing,
                         onToggle = { player.togglePlay() },
                         onOpen = { nav.navigate("nowPlaying") },
+                        onNext = { player.skipNext() },
+                        onPrev = { player.skipPrev() },
                     )
                 }
                 NavigationBar(containerColor = Background) {
@@ -175,7 +174,6 @@ fun MeloApp(
                         Triple("library", "Biblioteca", Icons.Default.Home),
                         Triple("search", "Buscar", Icons.Default.Search),
                         Triple("downloads", "Descargas", Icons.Default.Download),
-                        Triple("logs", "Logs", Icons.Default.Terminal),
                         Triple("settings", "Ajustes", Icons.Default.Settings),
                     )
                     items.forEach { (r, label, icon) ->
@@ -221,6 +219,7 @@ fun MeloApp(
                             }
                         },
                         onPlay = ::play,
+                        onOpenSettings = { nav.navigate("settings") },
                     )
                 }
                 composable("browse") {
@@ -239,8 +238,15 @@ fun MeloApp(
                 composable("search") { SearchScreen(container, ::play) }
                 composable("downloads") { DownloadsScreen(container) }
                 composable("logs") { LogsScreen() }
-                composable("settings") { SettingsScreen(container) }
-                composable("nowPlaying") { NowPlayingScreen(player) }
+                composable("settings") {
+                    SettingsScreen(
+                        container = container,
+                        onOpenLogs = { nav.navigate("logs") },
+                    )
+                }
+                composable("nowPlaying") {
+                    NowPlayingScreen(container, player)
+                }
                 composable("artists") { ArtistsScreen(container) { nav.navigate("artist/$it") } }
                 composable("albums") { AlbumsScreen(container) { nav.navigate("album/$it") } }
                 composable("playlists") { PlaylistsScreen(container) { nav.navigate("playlist/$it") } }
@@ -266,7 +272,12 @@ fun MeloApp(
                     GenreDetailScreen(container, it.arguments!!.getString("id")!!, ::play)
                 }
                 composable("folder/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) {
-                    FolderDetailScreen(container, it.arguments!!.getString("id")!!, ::play)
+                    FolderDetailScreen(
+                        container = container,
+                        id = it.arguments!!.getString("id")!!,
+                        onPlay = ::play,
+                        onDeleted = { nav.popBackStack() },
+                    )
                 }
             }
         }

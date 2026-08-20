@@ -4,14 +4,18 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Text
@@ -26,12 +30,14 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.melomaniac.app.BuildConfig
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.AppSettings
 import com.melomaniac.app.data.DownloadJobEntity
 import com.melomaniac.app.data.TrackRow
+import com.melomaniac.app.ui.AddToCollectionSheet
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.update.ReleaseUpdate
@@ -50,12 +56,14 @@ import com.melomaniac.app.util.AppLog
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun LibraryHomeScreen(
     container: AppContainer,
     onBrowse: () -> Unit,
     onOpenSection: (String) -> Unit,
     onPlay: (List<TrackRow>, Int) -> Unit,
+    onOpenSettings: () -> Unit = {},
 ) {
     // Fresh Flow collection each composition entry so returning to Home after
     // downloads always picks up Room invalidations (not a stale empty snapshot).
@@ -64,14 +72,48 @@ fun LibraryHomeScreen(
     val count by remember(container) { container.library.observeTrackCount() }
         .collectAsState(initial = 0)
     var query by remember { mutableStateOf("") }
-    val filtered = remember(tracks, query) { tracks.filterByQuery(query) }
+    var sort by remember { mutableStateOf(LibrarySort.ADDED) }
+    var addTrackId by remember { mutableStateOf<String?>(null) }
+    val filtered = remember(tracks, query, sort) {
+        val base = tracks.filterByQuery(query)
+        when (sort) {
+            LibrarySort.ADDED -> base
+            LibrarySort.TITLE -> base.sortedBy { it.title.lowercase() }
+            LibrarySort.ARTIST -> base.sortedBy { it.artistName.orEmpty().lowercase() }
+        }
+    }
     val scope = rememberCoroutineScope()
+    val settings by produceSettings(container)
+
+    addTrackId?.let { tid ->
+        AddToCollectionSheet(container, tid) { addTrackId = null }
+    }
 
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Biblioteca")
         Muted("Buscá un tema suelto o abrí playlists y favoritos.")
+        SetupChecklistBanner(settings, onOpenSettings)
         Spacer(Modifier.height(8.dp))
         AppTextField(query, { query = it }, "Filtrar canciones…")
+        Spacer(Modifier.height(8.dp))
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            LibrarySort.entries.forEach { s ->
+                FilterChip(
+                    selected = sort == s,
+                    onClick = { sort = s },
+                    label = {
+                        Text(
+                            when (s) {
+                                LibrarySort.ADDED -> "Agregado"
+                                LibrarySort.TITLE -> "Título"
+                                LibrarySort.ARTIST -> "Artista"
+                            },
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
+                )
+            }
+        }
         Spacer(Modifier.height(10.dp))
         LibraryQuickChips(onBrowse = onBrowse, onOpenSection = onOpenSection)
         Spacer(Modifier.height(12.dp))
@@ -106,8 +148,33 @@ fun LibraryHomeScreen(
                         AppLog.i("Library", msg)
                     }
                 },
+                onAddToCollection = { addTrackId = it },
             )
         }
+    }
+}
+
+private enum class LibrarySort { ADDED, TITLE, ARTIST }
+
+@Composable
+private fun produceSettings(container: AppContainer): androidx.compose.runtime.State<AppSettings> {
+    val state = remember { mutableStateOf(AppSettings()) }
+    LaunchedEffect(Unit) {
+        state.value = container.settings.get()
+    }
+    return state
+}
+
+@Composable
+private fun SetupChecklistBanner(
+    settings: AppSettings,
+    onOpenSettings: () -> Unit,
+) {
+    val needsTelegram = !settings.preferLocalStorage && !settings.isTelegramConfigured
+    if (!needsTelegram) return
+    Column(Modifier.padding(vertical = 8.dp)) {
+        Muted("Para empezar: configurá Telegram en Ajustes (o activá modo solo local).")
+        GhostButton("Ir a Ajustes", onClick = onOpenSettings)
     }
 }
 
@@ -175,6 +242,7 @@ fun BrowseLibraryScreen(onOpen: (String) -> Unit) {
 
 
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DownloadsScreen(container: AppContainer) {
     val jobs by container.downloadDao.observeAll().collectAsState(initial = emptyList())
@@ -182,6 +250,7 @@ fun DownloadsScreen(container: AppContainer) {
     val scope = rememberCoroutineScope()
     val globalBusy by AppBusy.message.collectAsState()
     var confirmClearQueue by remember { mutableStateOf(false) }
+    var filter by remember { mutableStateOf(DownloadFilter.ACTIVE) }
 
     if (confirmClearQueue) {
         androidx.compose.material3.AlertDialog(
@@ -212,9 +281,38 @@ fun DownloadsScreen(container: AppContainer) {
         )
     }
 
+    val visible = remember(jobs, filter) {
+        when (filter) {
+            DownloadFilter.ACTIVE -> jobs.filter { it.status == "queued" || it.status == "running" }
+            DownloadFilter.FAILED -> jobs.filter { it.status == "failed" }
+            DownloadFilter.DONE -> jobs.filter { it.status == "done" || it.status == "cancelled" }
+            DownloadFilter.ALL -> jobs
+        }
+    }
+
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Descargas")
         Muted(status)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            DownloadFilter.entries.forEach { f ->
+                FilterChip(
+                    selected = filter == f,
+                    onClick = { filter = f },
+                    label = {
+                        Text(
+                            when (f) {
+                                DownloadFilter.ACTIVE -> "Activas"
+                                DownloadFilter.FAILED -> "Fallidas"
+                                DownloadFilter.DONE -> "Hechas"
+                                DownloadFilter.ALL -> "Todas"
+                            },
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
         PrimaryButton("Reanudar cola", onClick = {
             scope.launch {
                 AppBusy.run("Reanudando cola…") {
@@ -239,39 +337,78 @@ fun DownloadsScreen(container: AppContainer) {
                 }
             }
         })
+        if (visible.isEmpty()) {
+            Muted(
+                when (filter) {
+                    DownloadFilter.ACTIVE -> "No hay descargas activas."
+                    DownloadFilter.FAILED -> "No hay fallos."
+                    DownloadFilter.DONE -> "Sin historial todavía."
+                    DownloadFilter.ALL -> "La cola está vacía."
+                },
+            )
+        }
         LazyColumn {
-            items(jobs, key = { it.id }) { job ->
-                DownloadJobCard(job, onRetry = {
-                    scope.launch {
-                        AppBusy.run("Reintentando…") {
-                            container.downloadQueue.retry(job.id)
+            items(visible, key = { it.id }) { job ->
+                DownloadJobCard(
+                    job = job,
+                    onRetry = {
+                        scope.launch {
+                            AppBusy.run("Reintentando…") {
+                                container.downloadQueue.retry(job.id)
+                            }
                         }
-                    }
-                })
+                    },
+                    onCancel = {
+                        scope.launch {
+                            container.downloadQueue.cancel(job.id)
+                        }
+                    },
+                )
             }
         }
     }
 }
 
+private enum class DownloadFilter { ACTIVE, FAILED, DONE, ALL }
+
 @Composable
-private fun DownloadJobCard(job: DownloadJobEntity, onRetry: () -> Unit) {
-    val meta = try {
-        JSONObject(job.metaJson)
-    } catch (_: Exception) {
-        JSONObject()
+private fun DownloadJobCard(
+    job: DownloadJobEntity,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val meta = remember(job.metaJson) {
+        runCatching { JSONObject(job.metaJson) }.getOrNull()
     }
-    val title = meta.optString("title").ifBlank { job.urlOrQuery }
-    androidx.compose.material3.Card(
-        colors = androidx.compose.material3.CardDefaults.cardColors(containerColor = Surface),
-        modifier = Modifier.padding(vertical = 4.dp),
+    val title = meta?.optString("title")?.ifBlank { null } ?: job.urlOrQuery.take(60)
+    val attempts = meta?.optInt("attempts") ?: 0
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Surface),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
     ) {
         Column(Modifier.padding(12.dp)) {
-            Text(title)
-            Text("${job.status.uppercase()} · ${job.progress.toInt()}%", color = TextSecondary)
-            job.error?.let { Text(it, color = MaterialThemeError()) }
-            ProgressBar(job.progress)
-            if (job.status == "failed") {
-                TextButton(onClick = onRetry) { Text("Reintentar", color = Accent) }
+            Text(title, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+            Text(
+                buildString {
+                    append(job.status)
+                    if (attempts > 0) append(" · reintento $attempts/3")
+                    job.error?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                },
+                color = TextSecondary,
+                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+            )
+            if (job.status == "running" || job.status == "queued") {
+                ProgressBar(job.progress)
+            }
+            Row {
+                if (job.status == "failed") {
+                    TextButton(onClick = onRetry) { Text("Reintentar", color = Accent) }
+                }
+                if (job.status == "queued" || job.status == "running") {
+                    TextButton(onClick = onCancel) { Text("Cancelar", color = Accent) }
+                }
             }
         }
     }
@@ -282,7 +419,10 @@ private fun MaterialThemeError() = androidx.compose.material3.MaterialTheme.colo
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(container: AppContainer) {
+fun SettingsScreen(
+    container: AppContainer,
+    onOpenLogs: () -> Unit = {},
+) {
     var settings by remember { mutableStateOf(AppSettings()) }
     var status by remember { mutableStateOf<String?>(null) }
     var pendingUpdate by remember { mutableStateOf<ReleaseUpdate?>(null) }
@@ -439,13 +579,33 @@ fun SettingsScreen(container: AppContainer) {
             colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
             modifier = Modifier.padding(top = 8.dp),
         )
+        FilterChip(
+            selected = settings.preferLocalStorage,
+            onClick = { save(settings.copy(preferLocalStorage = !settings.preferLocalStorage)) },
+            label = {
+                Text(
+                    if (settings.preferLocalStorage) {
+                        "Guardar en el teléfono (sin Telegram)"
+                    } else {
+                        "Almacenar en Telegram (online)"
+                    },
+                )
+            },
+            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = Accent),
+            modifier = Modifier.padding(top = 8.dp),
+        )
 
         Text("Telegram (almacenamiento online)", color = TextSecondary, modifier = Modifier.padding(top = 16.dp))
         Muted(
-            "Las descargas van a Telegram (HLS). Usá «Descargar localmente» en la biblioteca " +
-                "para guardar un tema o playlist offline en el teléfono. " +
-                "Creá un bot con @BotFather, un canal privado, agregá el bot como admin " +
-                "y pegá el token + channel ID (ej. -100…).",
+            if (settings.preferLocalStorage) {
+                "Modo local activo: las descargas nuevas se guardan en el teléfono. " +
+                    "Telegram sigue disponible para temas ya online."
+            } else {
+                "Las descargas van a Telegram (HLS). Usá «Descargar localmente» en la biblioteca " +
+                    "para guardar un tema o playlist offline en el teléfono. " +
+                    "Creá un bot con @BotFather, un canal privado, agregá el bot como admin " +
+                    "y pegá el token + channel ID (ej. -100…)."
+            },
         )
         Spacer(Modifier.height(8.dp))
         AppTextField(
@@ -525,6 +685,9 @@ fun SettingsScreen(container: AppContainer) {
                 }
             }
         })
+
+        Text("Diagnóstico", color = TextSecondary, modifier = Modifier.padding(top = 24.dp))
+        GhostButton("Ver logs", onClick = onOpenLogs)
 
         Text("Datos", color = TextSecondary, modifier = Modifier.padding(top = 24.dp))
         Muted("Vacía la base de datos Room y borra audio/portadas en filesDir.")

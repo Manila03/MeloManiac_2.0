@@ -9,6 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedOutputStream
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -29,6 +30,7 @@ import kotlin.concurrent.thread
 class HlsProxyServer(
     private val library: LibraryRepository,
     private val settingsRepo: SettingsRepository,
+    private val diskCacheDir: File? = null,
     private val port: Int = DEFAULT_PORT,
 ) {
     private val running = AtomicBoolean(false)
@@ -39,6 +41,10 @@ class HlsProxyServer(
 
     /** fileId → (filePath, expiresAtMs) */
     private val pathCache = ConcurrentHashMap<String, Pair<String, Long>>()
+
+    init {
+        diskCacheDir?.mkdirs()
+    }
 
     fun baseUrl(): String = "http://127.0.0.1:$port"
 
@@ -175,11 +181,45 @@ class HlsProxyServer(
         val segments = library.getSegments(trackId)
         val seg = segments.firstOrNull { it.segmentIndex == index }
             ?: error("Segmento $index no encontrado")
+        val cacheFile = diskCacheDir?.let { File(it, "${seg.telegramFileId}.bin") }
+        if (cacheFile != null && cacheFile.exists() &&
+            System.currentTimeMillis() - cacheFile.lastModified() < PATH_TTL_MS
+        ) {
+            return@withContext cacheFile.readBytes()
+        }
         val settings = settingsRepo.get()
         if (!settings.isTelegramConfigured) error("Telegram no configurado")
         val client = TelegramBotClient.fromToken(settings.telegramBotToken)
         val filePath = resolveFilePath(client, seg.telegramFileId)
-        client.downloadFile(filePath)
+        val bytes = client.downloadFile(filePath)
+        if (cacheFile != null) {
+            runCatching {
+                trimDiskCache()
+                cacheFile.writeBytes(bytes)
+            }
+        }
+        bytes
+    }
+
+    private fun trimDiskCache() {
+        val dir = diskCacheDir ?: return
+        val files = dir.listFiles()?.sortedBy { it.lastModified() } ?: return
+        var total = files.sumOf { it.length() }
+        val now = System.currentTimeMillis()
+        for (f in files) {
+            if (now - f.lastModified() > PATH_TTL_MS) {
+                total -= f.length()
+                f.delete()
+            }
+        }
+        val remaining = dir.listFiles()?.sortedBy { it.lastModified() } ?: return
+        total = remaining.sumOf { it.length() }
+        var i = 0
+        while (total > DISK_CACHE_MAX_BYTES && i < remaining.size) {
+            total -= remaining[i].length()
+            remaining[i].delete()
+            i++
+        }
     }
 
     private suspend fun resolveFilePath(client: TelegramBotClient, fileId: String): String {
@@ -221,6 +261,7 @@ class HlsProxyServer(
         private const val TAG = "HlsProxy"
         const val DEFAULT_PORT = 8765
         private const val PATH_TTL_MS = 50L * 60L * 1000L // 50 min
+        private const val DISK_CACHE_MAX_BYTES = 200L * 1024L * 1024L // 200 MB
         private val PLAYLIST_RE = Regex("^/hls/([^/]+)/index\\.m3u8$")
         private val SEGMENT_RE = Regex("^/hls/([^/]+)/seg/(\\d+)$")
         private val FILE_RE = Regex("^/file/([^/]+)$")

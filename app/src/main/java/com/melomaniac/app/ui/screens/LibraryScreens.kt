@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.melomaniac.app.data.AppContainer
 import com.melomaniac.app.data.TrackRow
+import com.melomaniac.app.ui.AddToCollectionSheet
 import com.melomaniac.app.ui.AppTextField
 import com.melomaniac.app.ui.GhostButton
 import com.melomaniac.app.ui.Muted
@@ -60,10 +61,17 @@ private fun LibraryTrackList(
     onPlay: (List<TrackRow>, Int) -> Unit,
     scope: CoroutineScope,
     onDelete: ((String) -> Unit)? = null,
+    onMoveUp: ((String) -> Unit)? = null,
+    onMoveDown: ((String) -> Unit)? = null,
+    emptyMessage: String = "Sin temas",
     deleteDialogTitle: String = "Borrar canción",
     deleteDialogText: ((TrackRow) -> String)? = null,
     deleteConfirmLabel: String = "Borrar",
 ) {
+    var addTrackId by remember { mutableStateOf<String?>(null) }
+    addTrackId?.let { tid ->
+        AddToCollectionSheet(container, tid) { addTrackId = null }
+    }
     TrackList(
         tracks = tracks,
         onPlay = onPlay,
@@ -75,13 +83,19 @@ private fun LibraryTrackList(
                     container.covers.deleteIfExists(orphan)
                 }
             }
+            Unit
         },
         onDownloadLocal = { id ->
             scope.launch {
                 val (_, msg) = container.downloadQueue.enqueueLocalDownload(id)
                 AppLog.i("Library", msg)
             }
+            Unit
         },
+        onAddToCollection = { addTrackId = it },
+        onMoveUp = onMoveUp,
+        onMoveDown = onMoveDown,
+        emptyMessage = emptyMessage,
         deleteDialogTitle = deleteDialogTitle,
         deleteDialogText = deleteDialogText,
         deleteConfirmLabel = deleteConfirmLabel,
@@ -93,9 +107,13 @@ fun ArtistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
     val artists by container.library.observeArtists().collectAsState(initial = emptyList())
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Artistas")
-        LazyColumn {
-            items(artists, key = { it.id }) { a ->
-                SimpleListItem(a.name) { onOpen(a.id) }
+        if (artists.isEmpty()) {
+            Muted("Todavía no hay artistas. Descargá temas desde Buscar.")
+        } else {
+            LazyColumn {
+                items(artists, key = { it.id }) { a ->
+                    SimpleListItem(a.name) { onOpen(a.id) }
+                }
             }
         }
     }
@@ -106,9 +124,13 @@ fun AlbumsScreen(container: AppContainer, onOpen: (String) -> Unit) {
     val albums by container.library.observeAlbums().collectAsState(initial = emptyList())
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Álbumes")
-        LazyColumn {
-            items(albums, key = { it.id }) { a ->
-                SimpleListItem(a.name, a.artistName) { onOpen(a.id) }
+        if (albums.isEmpty()) {
+            Muted("Todavía no hay álbumes.")
+        } else {
+            LazyColumn {
+                items(albums, key = { it.id }) { a ->
+                    SimpleListItem(a.name, a.artistName) { onOpen(a.id) }
+                }
             }
         }
     }
@@ -169,6 +191,9 @@ fun PlaylistsScreen(container: AppContainer, onOpen: (String) -> Unit) {
             }
         }
         Spacer(Modifier.height(8.dp))
+        if (playlists.isEmpty()) {
+            Muted("No hay playlists. Creá una o importá un link de Spotify/YouTube.")
+        }
         LazyColumn {
             items(playlists, key = { it.id }) { p ->
                 SimpleListItem(
@@ -203,9 +228,13 @@ fun GenresScreen(container: AppContainer, onOpen: (String) -> Unit) {
     val genres by container.library.observeGenres().collectAsState(initial = emptyList())
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Géneros")
-        LazyColumn {
-            items(genres, key = { it.id }) { g ->
-                SimpleListItem(g.name) { onOpen(g.id) }
+        if (genres.isEmpty()) {
+            Muted("Todavía no hay géneros.")
+        } else {
+            LazyColumn {
+                items(genres, key = { it.id }) { g ->
+                    SimpleListItem(g.name) { onOpen(g.id) }
+                }
             }
         }
     }
@@ -227,6 +256,9 @@ fun FoldersScreen(container: AppContainer, onOpen: (String) -> Unit) {
                 }
             }
         }
+        if (folders.isEmpty()) {
+            Muted("No hay carpetas. Creá una para organizar temas.")
+        }
         LazyColumn {
             items(folders, key = { it.id }) { f ->
                 SimpleListItem(f.name) { onOpen(f.id) }
@@ -241,7 +273,13 @@ fun FavoritesScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Un
     val scope = rememberCoroutineScope()
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Favoritos")
-        LibraryTrackList(container, tracks, onPlay, scope)
+        LibraryTrackList(
+            container,
+            tracks,
+            onPlay,
+            scope,
+            emptyMessage = "Marcá temas con el corazón para verlos acá.",
+        )
     }
 }
 
@@ -251,7 +289,13 @@ fun RecentScreen(container: AppContainer, onPlay: (List<TrackRow>, Int) -> Unit)
     val scope = rememberCoroutineScope()
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle("Recientes")
-        LibraryTrackList(container, tracks, onPlay, scope)
+        LibraryTrackList(
+            container,
+            tracks,
+            onPlay,
+            scope,
+            emptyMessage = "Todavía no reproduciste nada.",
+        )
     }
 }
 
@@ -447,6 +491,13 @@ fun PlaylistDetailScreen(
                         }
                     }
                 },
+                onMoveUp = { trackId ->
+                    scope.launch { container.library.movePlaylistTrack(id, trackId, -1) }
+                },
+                onMoveDown = { trackId ->
+                    scope.launch { container.library.movePlaylistTrack(id, trackId, 1) }
+                },
+                emptyMessage = "Esta playlist está vacía. Usá Editar temas.",
                 deleteDialogTitle = "Quitar de la playlist",
                 deleteDialogText = { t ->
                     "¿Sacar \"${t.title}\" de esta playlist? El tema sigue en la biblioteca."
@@ -472,15 +523,140 @@ fun GenreDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRo
 }
 
 @Composable
-fun FolderDetailScreen(container: AppContainer, id: String, onPlay: (List<TrackRow>, Int) -> Unit) {
+fun FolderDetailScreen(
+    container: AppContainer,
+    id: String,
+    onPlay: (List<TrackRow>, Int) -> Unit,
+    onDeleted: () -> Unit = {},
+) {
     val tracks by container.library.observeTracksByFolder(id).collectAsState(initial = emptyList())
+    val allTracks by container.library.observeTracks().collectAsState(initial = emptyList())
     var title by remember { mutableStateOf("Carpeta") }
+    var editingName by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf("") }
+    var editingTracks by remember { mutableStateOf(false) }
+    var trackPickerQuery by remember { mutableStateOf("") }
+    var confirmDelete by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val globalBusy by AppBusy.message.collectAsState()
+
     androidx.compose.runtime.LaunchedEffect(id) {
-        title = container.library.getFolder(id)?.name ?: "Carpeta"
+        val folder = container.library.getFolder(id)
+        title = folder?.name ?: "Carpeta"
+        nameDraft = folder?.name.orEmpty()
     }
+
+    if (confirmDelete) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("Eliminar carpeta") },
+            text = { Text("Se elimina \"$title\". Los temas permanecen en la biblioteca.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDelete = false
+                        scope.launch {
+                            AppBusy.run("Eliminando carpeta…") {
+                                container.library.deleteFolder(id)
+                            }
+                            onDeleted()
+                        }
+                    },
+                    enabled = globalBusy == null,
+                ) { Text("Eliminar", color = androidx.compose.material3.MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDelete = false }) { Text("Cancelar") }
+            },
+        )
+    }
+
     Column(Modifier.padding(16.dp).fillMaxSize()) {
         ScreenTitle(title)
-        LibraryTrackList(container, tracks, onPlay, scope)
+        if (editingName) {
+            AppTextField(nameDraft, { nameDraft = it }, "Nombre de la carpeta")
+            PrimaryButton("Guardar nombre", enabled = globalBusy == null) {
+                scope.launch {
+                    AppBusy.run("Guardando…") {
+                        container.library.renameFolder(id, nameDraft)
+                        title = nameDraft.trim().ifBlank { title }
+                        editingName = false
+                    }
+                }
+            }
+            GhostButton("Cancelar") { editingName = false }
+            Spacer(Modifier.height(8.dp))
+        } else {
+            Row(Modifier.fillMaxWidth()) {
+                GhostButton("Renombrar", modifier = Modifier.weight(1f)) {
+                    nameDraft = title
+                    editingName = true
+                }
+                Spacer(Modifier.width(8.dp))
+                GhostButton(
+                    if (editingTracks) "Listo" else "Editar temas",
+                    modifier = Modifier.weight(1f),
+                ) {
+                    editingTracks = !editingTracks
+                    if (!editingTracks) trackPickerQuery = ""
+                }
+            }
+            GhostButton("Eliminar carpeta") {
+                if (globalBusy == null) confirmDelete = true
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+
+        if (editingTracks) {
+            Muted("Marcá para agregar o quitar temas de esta carpeta.")
+            Spacer(Modifier.height(8.dp))
+            AppTextField(trackPickerQuery, { trackPickerQuery = it }, "Filtrar temas…")
+            Spacer(Modifier.height(8.dp))
+            val inFolder = tracks.map { it.id }.toSet()
+            val pickerTracks = remember(allTracks, trackPickerQuery) {
+                allTracks.filterByQuery(trackPickerQuery)
+            }
+            LazyColumn(Modifier.weight(1f)) {
+                items(pickerTracks, key = { it.id }) { track ->
+                    val checked = track.id in inFolder
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = checked,
+                            onCheckedChange = { on ->
+                                scope.launch {
+                                    if (on) container.library.addTrackToFolder(id, track.id)
+                                    else container.library.removeTrackFromFolder(id, track.id)
+                                }
+                            },
+                        )
+                        Column(Modifier.padding(start = 8.dp)) {
+                            Text(track.title)
+                            Muted(listOfNotNull(track.artistName, track.albumName).joinToString(" · "))
+                        }
+                    }
+                }
+            }
+        } else {
+            LibraryTrackList(
+                container = container,
+                tracks = tracks,
+                onPlay = onPlay,
+                scope = scope,
+                onDelete = { trackId ->
+                    scope.launch {
+                        container.library.removeTrackFromFolder(id, trackId)
+                    }
+                },
+                emptyMessage = "Esta carpeta está vacía.",
+                deleteDialogTitle = "Quitar de la carpeta",
+                deleteDialogText = { t -> "¿Sacar \"${t.title}\" de esta carpeta?" },
+                deleteConfirmLabel = "Quitar",
+            )
+        }
     }
 }

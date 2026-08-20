@@ -41,7 +41,15 @@ data class AlbumEntity(
         ForeignKey(entity = ArtistEntity::class, parentColumns = ["id"], childColumns = ["artistId"], onDelete = ForeignKey.SET_NULL),
         ForeignKey(entity = AlbumEntity::class, parentColumns = ["id"], childColumns = ["albumId"], onDelete = ForeignKey.SET_NULL),
     ],
-    indices = [Index("artistId"), Index("albumId"), Index("isFavorite"), Index("lastPlayedAt"), Index("storageMode")],
+    indices = [
+        Index("artistId"),
+        Index("albumId"),
+        Index("isFavorite"),
+        Index("lastPlayedAt"),
+        Index("storageMode"),
+        Index(value = ["youtubeId"], unique = true),
+        Index(value = ["spotifyId"], unique = true),
+    ],
 )
 data class TrackEntity(
     @PrimaryKey val id: String,

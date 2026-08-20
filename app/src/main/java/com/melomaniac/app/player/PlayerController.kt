@@ -25,6 +25,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 
+data class QueueItem(
+    val id: String,
+    val title: String,
+    val artist: String?,
+)
+
 data class PlayerUiState(
     val connected: Boolean = false,
     val playing: Boolean = false,
@@ -36,6 +42,10 @@ data class PlayerUiState(
     val durationMs: Long = 0,
     val shuffle: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
+    val queue: List<QueueItem> = emptyList(),
+    val queueIndex: Int = 0,
+    val isFavorite: Boolean = false,
+    val storageLabel: String? = null,
 )
 
 class PlayerController(
@@ -111,6 +121,35 @@ class PlayerController(
         if (c.currentPosition > 3000) c.seekTo(0) else c.seekToPreviousMediaItem()
     }
 
+    fun seekToIndex(index: Int) {
+        val c = controller ?: return
+        if (index in 0 until c.mediaItemCount) {
+            c.seekTo(index, 0)
+            c.play()
+        }
+    }
+
+    fun playNext(track: TrackRow) {
+        val c = controller ?: return
+        scope.launch {
+            if (!track.hasLocalFile) {
+                runCatching { hlsProxy.ensureStarted() }
+            }
+            val index = (c.currentMediaItemIndex + 1).coerceAtMost(c.mediaItemCount)
+            c.addMediaItem(index, track.toMediaItem())
+            syncFromPlayer()
+        }
+    }
+
+    fun toggleFavoriteCurrent() {
+        val id = _state.value.trackId ?: return
+        scope.launch {
+            library.toggleFavorite(id)
+            val t = library.getTrack(id)
+            _state.value = _state.value.copy(isFavorite = t?.isFavorite == true)
+        }
+    }
+
     fun seekTo(ms: Long) = controller?.seekTo(ms)
 
     fun cycleRepeat() {
@@ -151,17 +190,45 @@ class PlayerController(
         val c = controller ?: return
         val item = c.currentMediaItem
         val artwork = item?.mediaMetadata?.artworkUri?.path
+        val queue = buildList {
+            for (i in 0 until c.mediaItemCount) {
+                val mi = c.getMediaItemAt(i)
+                add(
+                    QueueItem(
+                        id = mi.mediaId,
+                        title = mi.mediaMetadata.title?.toString().orEmpty(),
+                        artist = mi.mediaMetadata.artist?.toString(),
+                    ),
+                )
+            }
+        }
+        val trackId = item?.mediaId
         _state.value = _state.value.copy(
             playing = c.isPlaying,
             title = item?.mediaMetadata?.title?.toString(),
             artist = item?.mediaMetadata?.artist?.toString(),
             coverPath = artwork,
-            trackId = item?.mediaId,
+            trackId = trackId,
             positionMs = c.currentPosition,
             durationMs = c.duration.coerceAtLeast(0),
             shuffle = c.shuffleModeEnabled,
             repeatMode = c.repeatMode,
+            queue = queue,
+            queueIndex = c.currentMediaItemIndex.coerceAtLeast(0),
         )
+        if (trackId != null) {
+            scope.launch {
+                val t = library.getTrack(trackId)
+                _state.value = _state.value.copy(
+                    isFavorite = t?.isFavorite == true,
+                    storageLabel = when {
+                        t == null -> null
+                        t.storageMode == TrackEntity.STORAGE_LOCAL -> "Local"
+                        else -> "Online"
+                    },
+                )
+            }
+        }
     }
 
     private fun startProgress() {

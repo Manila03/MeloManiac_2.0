@@ -38,7 +38,18 @@ class LibraryRepository(private val dao: LibraryDao) {
     }
 
     suspend fun createPlaylist(name: String, sourceUrl: String? = null): PlaylistEntity {
-        val playlist = PlaylistEntity(id = newId(), name = name.trim(), sourceUrl = sourceUrl)
+        val url = sourceUrl?.trim()?.takeIf { it.isNotEmpty() }
+        if (url != null) {
+            dao.findPlaylistBySourceUrl(url)?.let { existing ->
+                val trimmed = name.trim()
+                if (trimmed.isNotEmpty() && existing.name != trimmed) {
+                    dao.renamePlaylist(existing.id, trimmed)
+                    return existing.copy(name = trimmed)
+                }
+                return existing
+            }
+        }
+        val playlist = PlaylistEntity(id = newId(), name = name.trim(), sourceUrl = url)
         dao.upsertPlaylist(playlist)
         return playlist
     }
@@ -69,6 +80,36 @@ class LibraryRepository(private val dao: LibraryDao) {
         val folder = FolderEntity(id = newId(), name = name.trim())
         dao.upsertFolder(folder)
         return folder
+    }
+
+    suspend fun renameFolder(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        dao.renameFolder(id, trimmed)
+    }
+
+    suspend fun deleteFolder(id: String) {
+        dao.deleteFolderRow(id)
+    }
+
+    suspend fun addTrackToFolder(folderId: String, trackId: String) {
+        dao.insertFolderTrack(FolderTrackEntity(folderId, trackId))
+    }
+
+    suspend fun removeTrackFromFolder(folderId: String, trackId: String) {
+        dao.removeFolderTrack(folderId, trackId)
+    }
+
+    suspend fun movePlaylistTrack(playlistId: String, trackId: String, direction: Int) {
+        val ids = dao.trackIdsInPlaylist(playlistId)
+        val idx = ids.indexOf(trackId)
+        if (idx < 0) return
+        val swapWith = idx + direction
+        if (swapWith !in ids.indices) return
+        val a = ids[idx]
+        val b = ids[swapWith]
+        dao.updatePlaylistTrackPosition(playlistId, a, swapWith)
+        dao.updatePlaylistTrackPosition(playlistId, b, idx)
     }
 
     suspend fun addTrackToPlaylist(playlistId: String, trackId: String) {
@@ -120,16 +161,37 @@ class LibraryRepository(private val dao: LibraryDao) {
         // Reuse an existing library row when the same YouTube/Spotify identity is already present.
         val existing = findTrackByIdentity(youtubeId, spotifyId)
         if (existing != null) {
+            val artist = getOrCreateArtist(artistName ?: "Unknown Artist")
+            val resolvedAlbumId = albumId
+                ?: albumName?.takeIf { it.isNotBlank() }?.let { getOrCreateAlbum(it, artist.id).id }
+                ?: existing.albumId
+            dao.upsertTrack(
+                existing.copy(
+                    title = title.ifBlank { existing.title },
+                    artistId = artist.id,
+                    albumId = resolvedAlbumId ?: existing.albumId,
+                    durationMs = if (durationMs > 0) durationMs else existing.durationMs,
+                    path = path ?: existing.path,
+                    format = format.ifBlank { existing.format },
+                    sourceUrl = sourceUrl ?: existing.sourceUrl,
+                    sourceType = sourceType.ifBlank { existing.sourceType },
+                    spotifyId = spotifyId ?: existing.spotifyId,
+                    youtubeId = youtubeId ?: existing.youtubeId,
+                    coverPath = coverPath ?: existing.coverPath,
+                    storageMode = storageMode,
+                ),
+            )
             if (segments.isNotEmpty()) {
                 dao.deleteSegments(existing.id)
                 dao.upsertSegments(segments.map { it.copy(trackId = existing.id) })
             }
             if (!coverPath.isNullOrBlank()) {
                 existing.albumId?.let { dao.setAlbumCoverIfEmpty(it, coverPath) }
+                resolvedAlbumId?.let { dao.setAlbumCoverIfEmpty(it, coverPath) }
                 for (pid in allPlaylistIds) dao.setPlaylistCoverIfEmpty(pid, coverPath)
             }
             for (pid in allPlaylistIds) addTrackToPlaylist(pid, existing.id)
-            return existing
+            return dao.getTrack(existing.id) ?: existing
         }
 
         val artist = getOrCreateArtist(artistName ?: "Unknown Artist")
@@ -218,12 +280,12 @@ data class AppSettings(
     val fallbackQuality: String = "best",
     val downloadConcurrency: Int = 2,
     val preferFlac: Boolean = true,
-    /** @deprecated Habitual downloads always go to Telegram; kept for settings migration. */
+    /** When true, new downloads stay on device (no Telegram upload). */
+    val preferLocalStorage: Boolean = false,
+    /** @deprecated Habitual downloads go to Telegram unless [preferLocalStorage]. */
     val storageMode: String = TrackEntity.STORAGE_TELEGRAM,
     val telegramBotToken: String = "",
     val telegramChannelId: String = "",
-    val spotifyClientId: String = "",
-    val spotifyClientSecret: String = "",
 ) {
     val isTelegramConfigured: Boolean
         get() = telegramBotToken.isNotBlank() && telegramChannelId.isNotBlank()
@@ -236,11 +298,10 @@ class SettingsRepository(private val dao: SettingsDao) {
             fallbackQuality = map["fallbackQuality"] ?: "best",
             downloadConcurrency = map["downloadConcurrency"]?.toIntOrNull() ?: 2,
             preferFlac = map["preferFlac"]?.toBooleanStrictOrNull() ?: true,
+            preferLocalStorage = map["preferLocalStorage"]?.toBooleanStrictOrNull() ?: false,
             storageMode = map["storageMode"] ?: TrackEntity.STORAGE_TELEGRAM,
             telegramBotToken = map["telegramBotToken"].orEmpty(),
             telegramChannelId = map["telegramChannelId"].orEmpty(),
-            spotifyClientId = map["spotifyClientId"].orEmpty(),
-            spotifyClientSecret = map["spotifyClientSecret"].orEmpty(),
         )
     }
 
@@ -250,10 +311,9 @@ class SettingsRepository(private val dao: SettingsDao) {
         set("fallbackQuality", patch.fallbackQuality)
         set("downloadConcurrency", patch.downloadConcurrency.toString())
         set("preferFlac", patch.preferFlac.toString())
-        set("storageMode", TrackEntity.STORAGE_TELEGRAM)
+        set("preferLocalStorage", patch.preferLocalStorage.toString())
+        set("storageMode", if (patch.preferLocalStorage) TrackEntity.STORAGE_LOCAL else TrackEntity.STORAGE_TELEGRAM)
         set("telegramBotToken", patch.telegramBotToken)
         set("telegramChannelId", patch.telegramChannelId)
-        set("spotifyClientId", patch.spotifyClientId)
-        set("spotifyClientSecret", patch.spotifyClientSecret)
     }
 }

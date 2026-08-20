@@ -6,6 +6,7 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.melomaniac.app.BuildConfig
 
 @Database(
     entities = [
@@ -23,7 +24,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DownloadJobEntity::class,
         SettingEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -103,6 +104,40 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Keep one row per youtubeId / spotifyId (oldest wins).
+                db.execSQL(
+                    """
+                    DELETE FROM tracks WHERE id IN (
+                        SELECT t.id FROM tracks t
+                        INNER JOIN tracks t2
+                          ON t.youtubeId IS NOT NULL
+                         AND t.youtubeId = t2.youtubeId
+                         AND t.rowid > t2.rowid
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    DELETE FROM tracks WHERE id IN (
+                        SELECT t.id FROM tracks t
+                        INNER JOIN tracks t2
+                          ON t.spotifyId IS NOT NULL
+                         AND t.spotifyId = t2.spotifyId
+                         AND t.rowid > t2.rowid
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_tracks_youtubeId ON tracks(youtubeId)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS index_tracks_spotifyId ON tracks(spotifyId)",
+                )
+            }
+        }
+
         fun get(context: Context): AppDatabase =
             instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
@@ -110,8 +145,12 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "melomaniac.db",
                 )
-                    .addMigrations(MIGRATION_2_3)
-                    .fallbackToDestructiveMigration()
+                    .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+                    .apply {
+                        if (BuildConfig.DEBUG) {
+                            fallbackToDestructiveMigration()
+                        }
+                    }
                     .build()
                     .also { instance = it }
             }
